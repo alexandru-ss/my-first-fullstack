@@ -2,9 +2,9 @@ import { useCallback, useEffect, useImperativeHandle, useState } from 'react'
 import { supabase } from '../lib/supabase'
 
 // rerender-no-inline-components: NoteItem defined at module scope, receives props
-function NoteItem({ note, onEdit, onDelete }) {
+function NoteItem({ note, onEdit, onDelete, onTogglePin }) {
   return (
-    <li className="note-item">
+    <li className={`note-item${note.pinned ? ' note-item--pinned' : ''}`}>
       <div className="note-item-body">
         <h3 className="note-title">{note.title}</h3>
         {note.content && <p className="note-content">{note.content}</p>}
@@ -15,6 +15,14 @@ function NoteItem({ note, onEdit, onDelete }) {
         </time>
       </div>
       <div className="note-item-actions">
+        <button
+          className={`btn-pin${note.pinned ? ' is-pinned' : ''}`}
+          onClick={() => onTogglePin(note)}
+          aria-label={note.pinned ? 'Unpin note' : 'Pin note'}
+          title={note.pinned ? 'Unpin' : 'Pin'}
+        >
+          📌
+        </button>
         <button className="btn-secondary" onClick={() => onEdit(note)}>Edit</button>
         <button className="btn-danger" onClick={() => onDelete(note.id)}>Delete</button>
       </div>
@@ -48,7 +56,8 @@ export function NotesList({ userId, onEdit, listRef }) {
 
       const { data, error: fetchError } = await supabase
         .from('notes')
-        .select('id, title, content, created_at, updated_at')
+        .select('id, title, content, pinned, created_at, updated_at')
+        .order('pinned', { ascending: false })
         .order('updated_at', { ascending: false })
 
       if (cancelled) return
@@ -70,15 +79,42 @@ export function NotesList({ userId, onEdit, listRef }) {
   // rerender-functional-setstate: functional form so this callback never stales
   useImperativeHandle(listRef, () => ({
     upsert: (savedNote) => {
+      // rerender-functional-setstate + js-tosorted-immutable: merge then re-sort immutably
       setNotes(curr => {
-        const idx = curr.findIndex(n => n.id === savedNote.id)
-        if (idx === -1) return [savedNote, ...curr]
-        const next = [...curr]
-        next[idx] = savedNote
-        return next
+        const merged = curr.findIndex(n => n.id === savedNote.id) === -1
+          ? [savedNote, ...curr]
+          : curr.map(n => n.id === savedNote.id ? savedNote : n)
+        return merged.toSorted((a, b) =>
+          Number(b.pinned) - Number(a.pinned) ||
+          new Date(b.updated_at) - new Date(a.updated_at)
+        )
       })
     },
   }), [])
+
+  // rerender-functional-setstate: stable callback, no deps needed
+  const handleTogglePin = useCallback(async (note) => {
+    const newPinned = !note.pinned
+    const { error: updateError } = await supabase
+      .from('notes')
+      .update({ pinned: newPinned })
+      .eq('id', note.id)
+
+    if (updateError) {
+      alert(updateError.message)
+      return
+    }
+    // Flip the flag then re-sort so pinned notes float to the top instantly
+    // js-tosorted-immutable: toSorted() returns a new array without mutating state
+    setNotes(curr =>
+      curr
+        .map(n => n.id === note.id ? { ...n, pinned: newPinned } : n)
+        .toSorted((a, b) =>
+          Number(b.pinned) - Number(a.pinned) ||
+          new Date(b.updated_at) - new Date(a.updated_at)
+        )
+    )
+  }, [])
 
   const handleDelete = useCallback(async (noteId) => {
     const { error: deleteError } = await supabase
@@ -109,6 +145,7 @@ export function NotesList({ userId, onEdit, listRef }) {
           note={note}
           onEdit={onEdit}
           onDelete={handleDelete}
+          onTogglePin={handleTogglePin}
         />
       ))}
     </ul>

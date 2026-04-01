@@ -14,6 +14,7 @@ import { supabase } from '../lib/supabase'
 export function NoteEditor({ userId, note, onSave, onCancel }) {
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
+  const [pinned, setPinned] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
 
@@ -25,6 +26,7 @@ export function NoteEditor({ userId, note, onSave, onCancel }) {
   useEffect(() => {
     setTitle(note?.title ?? '')
     setContent(note?.content ?? '')
+    setPinned(note?.pinned ?? false)
     setError(null)
   }, [note?.id])
   /* eslint-enable react-hooks/exhaustive-deps */
@@ -39,6 +41,7 @@ export function NoteEditor({ userId, note, onSave, onCancel }) {
         user_id: userId,
         title: title.trim(),
         content: content.trim() || null,
+        pinned,
         updated_at: new Date().toISOString(),
       }
 
@@ -48,7 +51,7 @@ export function NoteEditor({ userId, note, onSave, onCancel }) {
           .from('notes')
           .update(payload)
           .eq('id', note.id)
-          .select('id, title, content, created_at, updated_at')
+          .select('id, title, content, pinned, created_at, updated_at')
           .single()
 
         if (upsertError) throw upsertError
@@ -58,7 +61,7 @@ export function NoteEditor({ userId, note, onSave, onCancel }) {
         const { data, error: insertError } = await supabase
           .from('notes')
           .insert(payload)
-          .select('id, title, content, created_at, updated_at')
+          .select('id, title, content, pinned, created_at, updated_at')
           .single()
 
         if (insertError) throw insertError
@@ -95,6 +98,16 @@ export function NoteEditor({ userId, note, onSave, onCancel }) {
           value={content}
           onChange={e => setContent(e.target.value)}
         />
+
+        <div className="field-checkbox">
+          <input
+            id="note-pinned"
+            type="checkbox"
+            checked={pinned}
+            onChange={e => setPinned(e.target.checked)}
+          />
+          <label htmlFor="note-pinned">Pin this note</label>
+        </div>
 
         {error && <p className="auth-error" role="alert">{error}</p>}
 
