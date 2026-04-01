@@ -1,0 +1,24 @@
+# Frontend dependencies (re-installed via npm install)
+frontend/node_modules/
+
+# Environment variables (contain API keys — never commit)
+.env
+.env.local
+.env*.local
+
+# MCP config (contains API tokens — never commit)
+.vscode/mcp.json
+
+# Build output
+frontend/dist/
+
+# Installed Packages
+frontend/node_modules/
+
+# Supabase local runtime data
+supabase/.branches/
+supabase/.temp/
+
+# OS files
+.DS_Store
+Thumbs.db
