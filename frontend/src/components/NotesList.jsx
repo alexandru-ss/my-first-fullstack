@@ -2,7 +2,7 @@ import { useCallback, useEffect, useImperativeHandle, useState } from 'react'
 import { supabase } from '../lib/supabase'
 
 // rerender-no-inline-components: NoteItem defined at module scope, receives props
-function NoteItem({ note, view, onEdit, onTogglePin, onArchive, onUnarchive, onDeletePermanently }) {
+function NoteItem({ note, view, onEdit, onTogglePin, onArchive, onUnarchive, onDeletePermanently, onTagClick }) {
   const dateValue = view === 'archived' ? note.archived_at : note.updated_at
   return (
     <li className={`note-item${note.pinned && view === 'active' ? ' note-item--pinned' : ''}`}>
@@ -14,6 +14,20 @@ function NoteItem({ note, view, onEdit, onTogglePin, onArchive, onUnarchive, onD
             year: 'numeric', month: 'short', day: 'numeric',
           })}
         </time>
+        {view === 'active' && note.tags && note.tags.length > 0 && (
+          <div className="tags-row">
+            {note.tags.map(tag => (
+              <button
+                key={tag.id}
+                className="tag-pill tag-pill--interactive"
+                onClick={() => onTagClick(tag)}
+                type="button"
+              >
+                {tag.name}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
       <div className="note-item-actions">
         {view === 'active' ? (
@@ -47,15 +61,17 @@ function NoteItem({ note, view, onEdit, onTogglePin, onArchive, onUnarchive, onD
  * @param {{
  *   userId: string,
  *   view: 'active' | 'archived',
- *   onEdit: (note: object) => void
+ *   activeTagId: number | null,
+ *   onEdit: (note: object) => void,
+ *   onTagClick: (tag: object) => void
  * }} props
  */
-export function NotesList({ userId, view, onEdit, listRef }) {
+export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listRef }) {
   const [notes, setNotes] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
-  // rerender-dependencies: depend on userId + view (both string primitives)
+  // rerender-dependencies: depend on userId + view + activeTagId (all primitives)
   useEffect(() => {
     if (!userId) return
 
@@ -65,9 +81,14 @@ export function NotesList({ userId, view, onEdit, listRef }) {
       setLoading(true)
       setError(null)
 
+      // Use inner join when filtering by tag so only notes with that tag are returned
+      const tagSelect = activeTagId != null
+        ? 'note_tags!inner(tag_id, tags(id, name))'
+        : 'note_tags(tag_id, tags(id, name))'
+
       let query = supabase
         .from('notes')
-        .select('id, title, content, pinned, archived_at, created_at, updated_at')
+        .select(`id, title, content, pinned, archived_at, created_at, updated_at, ${tagSelect}`)
 
       if (view === 'active') {
         query = query
@@ -80,6 +101,10 @@ export function NotesList({ userId, view, onEdit, listRef }) {
           .order('archived_at', { ascending: false })
       }
 
+      if (activeTagId != null) {
+        query = query.eq('note_tags.tag_id', activeTagId)
+      }
+
       const { data, error: fetchError } = await query
 
       if (cancelled) return
@@ -87,14 +112,18 @@ export function NotesList({ userId, view, onEdit, listRef }) {
       if (fetchError) {
         setError(fetchError.message)
       } else {
-        setNotes(data)
+        // Flatten note_tags[].tags → note.tags[] for cleaner component access
+        setNotes(data.map(n => ({
+          ...n,
+          tags: (n.note_tags ?? []).map(nt => nt.tags).filter(Boolean),
+        })))
       }
       setLoading(false)
     }
 
     fetchNotes()
     return () => { cancelled = true }
-  }, [userId, view])
+  }, [userId, view, activeTagId])
 
   // Expose an imperative handle so App can push a saved note into the list
   // without triggering a network round-trip.
@@ -201,6 +230,7 @@ export function NotesList({ userId, view, onEdit, listRef }) {
           onArchive={handleArchive}
           onUnarchive={handleUnarchive}
           onDeletePermanently={handleDeletePermanently}
+          onTagClick={onTagClick}
         />
       ))}
     </ul>

@@ -115,3 +115,34 @@ insert into public.notes (user_id, title, content, created_at, updated_at) value
     now() - interval '1 day',
     now()
   );
+
+-- ─── Tags ─────────────────────────────────────────────────────────────────
+
+insert into public.tags (user_id, name) values
+  ('a0000000-0000-0000-0000-000000000001', 'personal'),
+  ('a0000000-0000-0000-0000-000000000001', 'work'),
+  ('a0000000-0000-0000-0000-000000000001', 'shopping'),
+  ('b0000000-0000-0000-0000-000000000002', 'work'),
+  ('b0000000-0000-0000-0000-000000000002', 'reading');
+
+-- ─── Note tags ────────────────────────────────────────────────────────────
+
+insert into public.note_tags (note_id, tag_id)
+select n.id, t.id
+from public.notes n
+join public.tags t on t.user_id = n.user_id
+where
+  -- Alice: "Getting started" → personal
+  (n.title = 'Getting started' and t.name = 'personal' and n.user_id = 'a0000000-0000-0000-0000-000000000001')
+  or
+  -- Alice: "Shopping list" → shopping
+  (n.title = 'Shopping list' and t.name = 'shopping' and n.user_id = 'a0000000-0000-0000-0000-000000000001')
+  or
+  -- Alice: "Project ideas" → work
+  (n.title = 'Project ideas' and t.name = 'work' and n.user_id = 'a0000000-0000-0000-0000-000000000001')
+  or
+  -- Bob: "Meeting notes" → work
+  (n.title = 'Meeting notes 2026-03-28' and t.name = 'work' and n.user_id = 'b0000000-0000-0000-0000-000000000002')
+  or
+  -- Bob: "Reading list" → reading
+  (n.title = 'Reading list' and t.name = 'reading' and n.user_id = 'b0000000-0000-0000-0000-000000000002');

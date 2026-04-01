@@ -29,6 +29,9 @@ export default function App() {
   const [profileOpen, setProfileOpen] = useState(false)
   const [displayName, setDisplayName] = useState('')
   const [view, setView] = useState('active')
+  const [activeTag, setActiveTag] = useState(null)
+  // rerender-dependencies: pass primitive id, not the whole object
+  const activeTagId = activeTag?.id ?? null
 
   // Imperative ref so NoteEditor can push a saved note into NotesList
   // without a network re-fetch (async-parallel / avoiding waterfall)
@@ -88,6 +91,11 @@ export default function App() {
     setEditingNote(null)
   }
 
+  function handleTagClick(tag) {
+    // rerender-functional-setstate: toggle — clear if same tag clicked again
+    setActiveTag(prev => prev?.id === tag.id ? null : tag)
+  }
+
   function handleSaved(savedNote) {
     // Push into the list optimistically — no extra network round-trip
     listRef.current?.upsert(savedNote)
@@ -124,11 +132,20 @@ export default function App() {
           ) : null}
         </div>
 
+        {activeTag !== null ? (
+          <div className="tag-filter-bar">
+            Filtered by: <span className="tag-pill">{activeTag.name}</span>
+            <button className="btn-link" onClick={() => setActiveTag(null)}>Clear</button>
+          </div>
+        ) : null}
+
         {/* rerender-dependencies: pass user.id (string) not user (object) */}
         <NotesList
           userId={userId}
           view={view}
+          activeTagId={activeTagId}
           onEdit={openEdit}
+          onTagClick={handleTagClick}
           listRef={listRef}
         />
       </main>
