@@ -2,29 +2,39 @@ import { useCallback, useEffect, useImperativeHandle, useState } from 'react'
 import { supabase } from '../lib/supabase'
 
 // rerender-no-inline-components: NoteItem defined at module scope, receives props
-function NoteItem({ note, onEdit, onDelete, onTogglePin }) {
+function NoteItem({ note, view, onEdit, onTogglePin, onArchive, onUnarchive, onDeletePermanently }) {
+  const dateValue = view === 'archived' ? note.archived_at : note.updated_at
   return (
-    <li className={`note-item${note.pinned ? ' note-item--pinned' : ''}`}>
+    <li className={`note-item${note.pinned && view === 'active' ? ' note-item--pinned' : ''}`}>
       <div className="note-item-body">
         <h3 className="note-title">{note.title}</h3>
         {note.content && <p className="note-content">{note.content}</p>}
-        <time className="note-date" dateTime={note.updated_at}>
-          {new Date(note.updated_at).toLocaleDateString(undefined, {
+        <time className="note-date" dateTime={dateValue}>
+          {new Date(dateValue).toLocaleDateString(undefined, {
             year: 'numeric', month: 'short', day: 'numeric',
           })}
         </time>
       </div>
       <div className="note-item-actions">
-        <button
-          className={`btn-pin${note.pinned ? ' is-pinned' : ''}`}
-          onClick={() => onTogglePin(note)}
-          aria-label={note.pinned ? 'Unpin note' : 'Pin note'}
-          title={note.pinned ? 'Unpin' : 'Pin'}
-        >
-          📌
-        </button>
-        <button className="btn-secondary" onClick={() => onEdit(note)}>Edit</button>
-        <button className="btn-danger" onClick={() => onDelete(note.id)}>Delete</button>
+        {view === 'active' ? (
+          <>
+            <button
+              className={`btn-pin${note.pinned ? ' is-pinned' : ''}`}
+              onClick={() => onTogglePin(note)}
+              aria-label={note.pinned ? 'Unpin note' : 'Pin note'}
+              title={note.pinned ? 'Unpin' : 'Pin'}
+            >
+              📌
+            </button>
+            <button className="btn-secondary" onClick={() => onEdit(note)}>Edit</button>
+            <button className="btn-secondary" onClick={() => onArchive(note)}>Archive</button>
+          </>
+        ) : (
+          <>
+            <button className="btn-secondary" onClick={() => onUnarchive(note)}>Unarchive</button>
+            <button className="btn-danger" onClick={() => onDeletePermanently(note.id)}>Delete</button>
+          </>
+        )}
       </div>
     </li>
   )
@@ -36,15 +46,16 @@ function NoteItem({ note, onEdit, onDelete, onTogglePin }) {
  *
  * @param {{
  *   userId: string,
+ *   view: 'active' | 'archived',
  *   onEdit: (note: object) => void
  * }} props
  */
-export function NotesList({ userId, onEdit, listRef }) {
+export function NotesList({ userId, view, onEdit, listRef }) {
   const [notes, setNotes] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
-  // rerender-dependencies: depend on userId (string primitive), not the user object
+  // rerender-dependencies: depend on userId + view (both string primitives)
   useEffect(() => {
     if (!userId) return
 
@@ -54,11 +65,22 @@ export function NotesList({ userId, onEdit, listRef }) {
       setLoading(true)
       setError(null)
 
-      const { data, error: fetchError } = await supabase
+      let query = supabase
         .from('notes')
-        .select('id, title, content, pinned, created_at, updated_at')
-        .order('pinned', { ascending: false })
-        .order('updated_at', { ascending: false })
+        .select('id, title, content, pinned, archived_at, created_at, updated_at')
+
+      if (view === 'active') {
+        query = query
+          .is('archived_at', null)
+          .order('pinned', { ascending: false })
+          .order('updated_at', { ascending: false })
+      } else {
+        query = query
+          .not('archived_at', 'is', null)
+          .order('archived_at', { ascending: false })
+      }
+
+      const { data, error: fetchError } = await query
 
       if (cancelled) return
 
@@ -72,15 +94,23 @@ export function NotesList({ userId, onEdit, listRef }) {
 
     fetchNotes()
     return () => { cancelled = true }
-  }, [userId])
+  }, [userId, view])
 
   // Expose an imperative handle so App can push a saved note into the list
   // without triggering a network round-trip.
   // rerender-functional-setstate: functional form so this callback never stales
   useImperativeHandle(listRef, () => ({
     upsert: (savedNote) => {
-      // rerender-functional-setstate + js-tosorted-immutable: merge then re-sort immutably
+      // rerender-functional-setstate + js-tosorted-immutable: merge then re-sort immutably.
+      // Filter out notes that no longer belong to the current view
+      // (e.g. a note archived from the active view disappears immediately).
       setNotes(curr => {
+        const noteMatchesView = view === 'active'
+          ? savedNote.archived_at == null
+          : savedNote.archived_at != null
+        if (!noteMatchesView) {
+          return curr.filter(n => n.id !== savedNote.id)
+        }
         const merged = curr.findIndex(n => n.id === savedNote.id) === -1
           ? [savedNote, ...curr]
           : curr.map(n => n.id === savedNote.id ? savedNote : n)
@@ -90,7 +120,7 @@ export function NotesList({ userId, onEdit, listRef }) {
         )
       })
     },
-  }), [])
+  }), [view])
 
   // rerender-functional-setstate: stable callback, no deps needed
   const handleTogglePin = useCallback(async (note) => {
@@ -116,17 +146,35 @@ export function NotesList({ userId, onEdit, listRef }) {
     )
   }, [])
 
-  const handleDelete = useCallback(async (noteId) => {
+  // rerender-functional-setstate: stable callbacks, no stale-closure risk
+  const handleArchive = useCallback(async (note) => {
+    const archivedAt = new Date().toISOString()
+    const { error: updateError } = await supabase
+      .from('notes')
+      .update({ archived_at: archivedAt })
+      .eq('id', note.id)
+
+    if (updateError) { alert(updateError.message); return }
+    setNotes(curr => curr.filter(n => n.id !== note.id))
+  }, [])
+
+  const handleUnarchive = useCallback(async (note) => {
+    const { error: updateError } = await supabase
+      .from('notes')
+      .update({ archived_at: null })
+      .eq('id', note.id)
+
+    if (updateError) { alert(updateError.message); return }
+    setNotes(curr => curr.filter(n => n.id !== note.id))
+  }, [])
+
+  const handleDeletePermanently = useCallback(async (noteId) => {
     const { error: deleteError } = await supabase
       .from('notes')
       .delete()
       .eq('id', noteId)
 
-    if (deleteError) {
-      alert(deleteError.message)
-      return
-    }
-    // rerender-functional-setstate
+    if (deleteError) { alert(deleteError.message); return }
     setNotes(curr => curr.filter(n => n.id !== noteId))
   }, [])
 
@@ -134,7 +182,11 @@ export function NotesList({ userId, onEdit, listRef }) {
   if (error)   return <p className="notes-status notes-error" role="alert">Error: {error}</p>
 
   if (notes.length === 0) {
-    return <p className="notes-status">No notes yet. Create your first one!</p>
+    return (
+      <p className="notes-status">
+        {view === 'archived' ? 'No archived notes.' : 'No notes yet. Create your first one!'}
+      </p>
+    )
   }
 
   return (
@@ -143,9 +195,12 @@ export function NotesList({ userId, onEdit, listRef }) {
         <NoteItem
           key={note.id}
           note={note}
+          view={view}
           onEdit={onEdit}
-          onDelete={handleDelete}
           onTogglePin={handleTogglePin}
+          onArchive={handleArchive}
+          onUnarchive={handleUnarchive}
+          onDeletePermanently={handleDeletePermanently}
         />
       ))}
     </ul>

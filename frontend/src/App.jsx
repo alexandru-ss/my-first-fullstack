@@ -28,6 +28,7 @@ export default function App() {
   const [editorOpen, setEditorOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   const [displayName, setDisplayName] = useState('')
+  const [view, setView] = useState('active')
 
   // Imperative ref so NoteEditor can push a saved note into NotesList
   // without a network re-fetch (async-parallel / avoiding waterfall)
@@ -104,13 +105,29 @@ export default function App() {
 
       <main className="app-main">
         <div className="notes-toolbar">
-          <h1>My Notes</h1>
-          <button className="btn-primary" onClick={openCreate}>+ New note</button>
+          <div className="notes-tabs">
+            <button
+              className={`tab-btn${view === 'active' ? ' tab-btn--active' : ''}`}
+              onClick={() => setView('active')}
+            >
+              Notes
+            </button>
+            <button
+              className={`tab-btn${view === 'archived' ? ' tab-btn--active' : ''}`}
+              onClick={() => setView('archived')}
+            >
+              Archived
+            </button>
+          </div>
+          {view === 'active' ? (
+            <button className="btn-primary" onClick={openCreate}>+ New note</button>
+          ) : null}
         </div>
 
         {/* rerender-dependencies: pass user.id (string) not user (object) */}
         <NotesList
           userId={userId}
+          view={view}
           onEdit={openEdit}
           listRef={listRef}
         />

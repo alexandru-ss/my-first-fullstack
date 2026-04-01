@@ -71,9 +71,32 @@
   margin-bottom: 24px;
 }
 
-.notes-toolbar h1 {
-  margin: 0;
-  font-size: 1.6rem;
+/* ── View tabs ───────────────────────────────────────────────────────────── */
+
+.notes-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.tab-btn {
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 500;
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+
+  &:hover:not(.tab-btn--active) { background: var(--accent-bg); }
+  &:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+}
+
+.tab-btn--active {
+  background: var(--accent-bg);
+  color: var(--accent);
 }
 
 /* ── Notes list ──────────────────────────────────────────────────────────── */
