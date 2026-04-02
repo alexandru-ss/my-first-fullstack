@@ -103,6 +103,18 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
   const [totalCount, setTotalCount] = useState(null)
   const [loadingMore, setLoadingMore] = useState(false)
 
+  // Inline error toast — auto-dismissed after 4 s.
+  // rerender-use-ref-transient-values: dismiss timer lives in a ref so updates don't re-render.
+  const [toastError, setToastError] = useState(null)
+  const toastTimerRef = useRef(null)
+
+  // rerender-move-effect-to-event: showError is called from handlers, never from effects.
+  function showError(message) {
+    clearTimeout(toastTimerRef.current)
+    setToastError(message)
+    toastTimerRef.current = setTimeout(() => setToastError(null), 4000)
+  }
+
   // Search state: searchInput is bound to the <input> value (updates on every keystroke).
   // debouncedSearch is what actually triggers the fetch (updated 300ms after typing stops).
   // rerender-use-ref-transient-values: timer ID lives in a ref — updating it must not re-render.
@@ -273,18 +285,10 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
 
   // rerender-functional-setstate: stable callback, no deps needed
   const handleTogglePin = useCallback(async (note) => {
-    const newPinned = !note.pinned
-    const { error: updateError } = await supabase
-      .from('notes')
-      .update({ pinned: newPinned })
-      .eq('id', note.id)
-
-    if (updateError) {
-      alert(updateError.message)
-      return
-    }
-    // Flip the flag then re-sort so pinned notes float to the top instantly
-    // js-tosorted-immutable: toSorted() returns a new array without mutating state
+    const previousPinned = note.pinned
+    const newPinned = !previousPinned
+    // Optimistically apply: flip the flag and re-sort before hitting the network.
+    // js-tosorted-immutable: toSorted() returns a new array without mutating state.
     setNotes(curr =>
       curr
         .map(n => n.id === note.id ? { ...n, pinned: newPinned } : n)
@@ -293,31 +297,70 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
           new Date(b.updated_at) - new Date(a.updated_at)
         )
     )
+    const { error: updateError } = await supabase
+      .from('notes')
+      .update({ pinned: newPinned })
+      .eq('id', note.id)
+
+    if (updateError) {
+      // Rollback: restore the previous pinned value and re-sort.
+      setNotes(curr =>
+        curr
+          .map(n => n.id === note.id ? { ...n, pinned: previousPinned } : n)
+          .toSorted((a, b) =>
+            Number(b.pinned) - Number(a.pinned) ||
+            new Date(b.updated_at) - new Date(a.updated_at)
+          )
+      )
+      showError('Failed to update pin. Please try again.')
+    }
   }, [])
 
   // rerender-functional-setstate: stable callbacks, no stale-closure risk
   const handleArchive = useCallback(async (note) => {
     const archivedAt = new Date().toISOString()
+    // Optimistically remove from the active list and decrement the count.
+    setNotes(curr => curr.filter(n => n.id !== note.id))
+    setTotalCount(c => c !== null ? c - 1 : null)
+
     const { error: updateError } = await supabase
       .from('notes')
       .update({ archived_at: archivedAt })
       .eq('id', note.id)
 
-    if (updateError) { alert(updateError.message); return }
-    setNotes(curr => curr.filter(n => n.id !== note.id))
-    // rerender-functional-setstate: decrement count without capturing stale value
-    setTotalCount(c => c !== null ? c - 1 : null)
+    if (updateError) {
+      // Rollback: restore the note in its sorted position.
+      setNotes(curr =>
+        [...curr, { ...note, archived_at: archivedAt }].toSorted((a, b) =>
+          Number(b.pinned) - Number(a.pinned) ||
+          new Date(b.updated_at) - new Date(a.updated_at)
+        )
+      )
+      setTotalCount(c => c !== null ? c + 1 : null)
+      showError('Failed to archive note. Please try again.')
+    }
   }, [])
 
   const handleUnarchive = useCallback(async (note) => {
+    // Optimistically remove from the archived list and decrement the count.
+    setNotes(curr => curr.filter(n => n.id !== note.id))
+    setTotalCount(c => c !== null ? c - 1 : null)
+
     const { error: updateError } = await supabase
       .from('notes')
       .update({ archived_at: null })
       .eq('id', note.id)
 
-    if (updateError) { alert(updateError.message); return }
-    setNotes(curr => curr.filter(n => n.id !== note.id))
-    setTotalCount(c => c !== null ? c - 1 : null)
+    if (updateError) {
+      // Rollback: restore the note in its archived_at-sorted position.
+      setNotes(curr =>
+        [...curr, note].toSorted((a, b) =>
+          new Date(b.archived_at) - new Date(a.archived_at)
+        )
+      )
+      setTotalCount(c => c !== null ? c + 1 : null)
+      showError('Failed to unarchive note. Please try again.')
+    }
   }, [])
 
   const handleDeletePermanently = useCallback(async (noteId) => {
@@ -326,7 +369,7 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
       .delete()
       .eq('id', noteId)
 
-    if (deleteError) { alert(deleteError.message); return }
+    if (deleteError) { showError('Failed to delete note. Please try again.'); return }
     setNotes(curr => curr.filter(n => n.id !== noteId))
     setTotalCount(c => c !== null ? c - 1 : null)
   }, [])
@@ -360,6 +403,9 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
 
   return (
     <>
+      {toastError && (
+        <div className="toast-error" role="alert">{toastError}</div>
+      )}
       <SearchBar value={searchInput} onChange={handleSearchChange} onClear={handleSearchClear} />
       <ul className="notes-list">
         {notes.map(note => (
