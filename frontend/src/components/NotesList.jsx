@@ -80,6 +80,8 @@ function NoteItem({ note, view, onEdit, onTogglePin, onArchive, onUnarchive, onD
   )
 }
 
+const PAGE_SIZE = 10
+
 /**
  * Fetches and displays notes for the given user.
  * Exposes `onSaved` to let a parent push optimistic updates without re-fetching.
@@ -96,6 +98,10 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
   const [notes, setNotes] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  // totalCount: total rows matching current filters; null when search is active (no pagination).
+  // rerender-split-combined-hooks: independent of `loading` — different lifecycles.
+  const [totalCount, setTotalCount] = useState(null)
+  const [loadingMore, setLoadingMore] = useState(false)
 
   // Search state: searchInput is bound to the <input> value (updates on every keystroke).
   // debouncedSearch is what actually triggers the fetch (updated 300ms after typing stops).
@@ -128,15 +134,21 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
     async function fetchNotes() {
       setLoading(true)
       setError(null)
+      setLoadingMore(false)
+
+      const isSearching = debouncedSearch.trim() !== ''
 
       // Use inner join when filtering by tag so only notes with that tag are returned
       const tagSelect = activeTagId != null
         ? 'note_tags!inner(tag_id, tags(id, name))'
         : 'note_tags(tag_id, tags(id, name))'
 
-      let query = supabase
-        .from('notes')
-        .select(`id, title, content, pinned, archived_at, created_at, updated_at, ${tagSelect}`)
+      const selectStr = `id, title, content, pinned, archived_at, created_at, updated_at, ${tagSelect}`
+
+      // Search returns all matches (no pagination). Normal browsing paginates with count.
+      let query = isSearching
+        ? supabase.from('notes').select(selectStr)
+        : supabase.from('notes').select(selectStr, { count: 'exact' })
 
       if (view === 'active') {
         query = query.is('archived_at', null)
@@ -144,7 +156,7 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
         query = query.not('archived_at', 'is', null)
       }
 
-      if (debouncedSearch.trim() !== '') {
+      if (isSearching) {
         // Full-text search via the generated search_vector column.
         // 'websearch' maps to websearch_to_tsquery — safely handles arbitrary user input
         // without tsquery injection (e.g. bare & | ! chars won't cause a parse error).
@@ -161,13 +173,14 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
         } else {
           query = query.order('archived_at', { ascending: false })
         }
+        query = query.range(0, PAGE_SIZE - 1)
       }
 
       if (activeTagId != null) {
         query = query.eq('note_tags.tag_id', activeTagId)
       }
 
-      const { data, error: fetchError } = await query
+      const { data, count, error: fetchError } = await query
 
       if (cancelled) return
 
@@ -179,6 +192,8 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
           ...n,
           tags: (n.note_tags ?? []).map(nt => nt.tags).filter(Boolean),
         })))
+        // null during search (pagination disabled); exact count when browsing
+        setTotalCount(isSearching ? null : count)
       }
       setLoading(false)
     }
@@ -212,6 +227,49 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
       })
     },
   }), [view])
+
+  async function handleLoadMore() {
+    if (loadingMore) return
+    setLoadingMore(true)
+
+    const tagSelect = activeTagId != null
+      ? 'note_tags!inner(tag_id, tags(id, name))'
+      : 'note_tags(tag_id, tags(id, name))'
+
+    let query = supabase
+      .from('notes')
+      .select(`id, title, content, pinned, archived_at, created_at, updated_at, ${tagSelect}`)
+
+    if (view === 'active') {
+      query = query
+        .is('archived_at', null)
+        .order('pinned', { ascending: false })
+        .order('updated_at', { ascending: false })
+    } else {
+      query = query
+        .not('archived_at', 'is', null)
+        .order('archived_at', { ascending: false })
+    }
+
+    if (activeTagId != null) {
+      query = query.eq('note_tags.tag_id', activeTagId)
+    }
+
+    // notes.length is captured at call time — safe here since this runs in an event handler
+    query = query.range(notes.length, notes.length + PAGE_SIZE - 1)
+
+    const { data, error: fetchError } = await query
+
+    if (!fetchError) {
+      const newNotes = data.map(n => ({
+        ...n,
+        tags: (n.note_tags ?? []).map(nt => nt.tags).filter(Boolean),
+      }))
+      // rerender-functional-setstate: append without stale closure risk
+      setNotes(curr => [...curr, ...newNotes])
+    }
+    setLoadingMore(false)
+  }
 
   // rerender-functional-setstate: stable callback, no deps needed
   const handleTogglePin = useCallback(async (note) => {
@@ -247,6 +305,8 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
 
     if (updateError) { alert(updateError.message); return }
     setNotes(curr => curr.filter(n => n.id !== note.id))
+    // rerender-functional-setstate: decrement count without capturing stale value
+    setTotalCount(c => c !== null ? c - 1 : null)
   }, [])
 
   const handleUnarchive = useCallback(async (note) => {
@@ -257,6 +317,7 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
 
     if (updateError) { alert(updateError.message); return }
     setNotes(curr => curr.filter(n => n.id !== note.id))
+    setTotalCount(c => c !== null ? c - 1 : null)
   }, [])
 
   const handleDeletePermanently = useCallback(async (noteId) => {
@@ -267,6 +328,7 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
 
     if (deleteError) { alert(deleteError.message); return }
     setNotes(curr => curr.filter(n => n.id !== noteId))
+    setTotalCount(c => c !== null ? c - 1 : null)
   }, [])
 
   if (loading) return (
@@ -314,6 +376,13 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
           />
         ))}
       </ul>
+      {debouncedSearch.trim() === '' && totalCount !== null && notes.length < totalCount && (
+        <div className="load-more-row">
+          <button className="btn-secondary" onClick={handleLoadMore} disabled={loadingMore}>
+            {loadingMore ? 'Loading…' : 'Load more'}
+          </button>
+        </div>
+      )}
     </>
   )
 }
