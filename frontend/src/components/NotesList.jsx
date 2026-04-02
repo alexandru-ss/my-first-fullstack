@@ -122,6 +122,13 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const debounceTimerRef = useRef(null)
 
+  // advanced-use-latest: updated every render so the Realtime handler always reads
+  // current values without recreating the channel subscription on every prop change.
+  const viewRef = useRef(view)
+  viewRef.current = view
+  const activeTagIdRef = useRef(activeTagId)
+  activeTagIdRef.current = activeTagId
+
   // rerender-move-effect-to-event: timer management lives in the event handler, not an effect.
   function handleSearchChange(e) {
     const value = e.target.value
@@ -239,6 +246,73 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
       })
     },
   }), [view])
+
+  // rerender-split-combined-hooks: Realtime subscription has a different lifecycle
+  // from the fetch effect — only recreated when the signed-in user changes.
+  useEffect(() => {
+    if (!userId) return
+
+    const channel = supabase
+      .channel(`notes-realtime-${userId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'notes', filter: `user_id=eq.${userId}` },
+        (payload) => {
+          const { eventType, new: newRow, old: oldRow } = payload
+          const currentView = viewRef.current
+          const currentTagId = activeTagIdRef.current
+
+          // ── INSERT ────────────────────────────────────────────────────────
+          if (eventType === 'INSERT') {
+            // Raw Realtime payload has no joined tag data, so we can't verify
+            // the tag filter match without an extra round-trip. Skip the insert
+            // and let the next full fetch reconcile it.
+            if (currentTagId != null) return
+            const noteMatchesView = currentView === 'active'
+              ? newRow.archived_at == null
+              : newRow.archived_at != null
+            if (!noteMatchesView) return
+            const sortFn = currentView === 'active'
+              ? (a, b) => Number(b.pinned) - Number(a.pinned) || new Date(b.updated_at) - new Date(a.updated_at)
+              : (a, b) => new Date(b.archived_at) - new Date(a.archived_at)
+            // rerender-functional-setstate + js-tosorted-immutable
+            setNotes(curr => {
+              // Dedup: same-tab inserts via listRef.upsert() may have already applied this note
+              if (curr.some(n => n.id === newRow.id)) return curr
+              return [{ ...newRow, tags: [] }, ...curr].toSorted(sortFn)
+            })
+            setTotalCount(c => c !== null ? c + 1 : null)
+          }
+
+          // ── UPDATE ────────────────────────────────────────────────────────
+          if (eventType === 'UPDATE') {
+            setNotes(curr => {
+              const existing = curr.find(n => n.id === newRow.id)
+              if (!existing) return curr // note not in the current page/view
+              const noteMatchesView = currentView === 'active'
+                ? newRow.archived_at == null
+                : newRow.archived_at != null
+              if (!noteMatchesView) return curr.filter(n => n.id !== newRow.id)
+              // Preserve joined tags (not present in raw Realtime payload)
+              const updated = { ...existing, ...newRow, tags: existing.tags }
+              const sortFn = currentView === 'active'
+                ? (a, b) => Number(b.pinned) - Number(a.pinned) || new Date(b.updated_at) - new Date(a.updated_at)
+                : (a, b) => new Date(b.archived_at) - new Date(a.archived_at)
+              return curr.map(n => n.id === newRow.id ? updated : n).toSorted(sortFn)
+            })
+          }
+
+          // ── DELETE ────────────────────────────────────────────────────────
+          if (eventType === 'DELETE') {
+            setNotes(curr => curr.filter(n => n.id !== oldRow.id))
+            setTotalCount(c => c !== null ? c - 1 : null)
+          }
+        }
+      )
+      .subscribe()
+
+    return () => { supabase.removeChannel(channel) }
+  }, [userId])
 
   async function handleLoadMore() {
     if (loadingMore) return
