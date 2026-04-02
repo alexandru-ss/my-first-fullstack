@@ -478,3 +478,40 @@
   padding: 0 0 12px;
 }
 
+/* ── Search bar ──────────────────────────────────────────────────────────── */
+
+.search-bar {
+  position: relative;
+  margin-bottom: 20px;
+}
+
+.search-bar-input {
+  /* padding-right leaves room for the clear (✕) button */
+  padding-right: 36px;
+
+  /* hide the browser's native clear button on <input type="search"> */
+  &::-webkit-search-cancel-button { display: none; }
+}
+
+.search-bar-clear {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  font: inherit;
+  font-size: 0.8rem;
+  line-height: 1;
+  border: none;
+  background: none;
+  color: var(--text);
+  opacity: 0.5;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  transition: opacity 0.15s;
+
+  &:hover { opacity: 1; }
+  &:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+}
+
+

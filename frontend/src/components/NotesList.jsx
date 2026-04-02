@@ -1,5 +1,31 @@
-import { useCallback, useEffect, useImperativeHandle, useState } from 'react'
+import { useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
+
+// rerender-no-inline-components: SearchBar defined at module scope, receives props
+function SearchBar({ value, onChange, onClear }) {
+  return (
+    <div className="search-bar">
+      <input
+        className="search-bar-input field-input"
+        type="search"
+        placeholder="Search notes…"
+        value={value}
+        onChange={onChange}
+        aria-label="Search notes"
+      />
+      {value !== '' && (
+        <button
+          className="search-bar-clear"
+          onClick={onClear}
+          aria-label="Clear search"
+          type="button"
+        >
+          ✕
+        </button>
+      )}
+    </div>
+  )
+}
 
 // rerender-no-inline-components: NoteItem defined at module scope, receives props
 function NoteItem({ note, view, onEdit, onTogglePin, onArchive, onUnarchive, onDeletePermanently, onTagClick }) {
@@ -71,7 +97,29 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
-  // rerender-dependencies: depend on userId + view + activeTagId (all primitives)
+  // Search state: searchInput is bound to the <input> value (updates on every keystroke).
+  // debouncedSearch is what actually triggers the fetch (updated 300ms after typing stops).
+  // rerender-use-ref-transient-values: timer ID lives in a ref — updating it must not re-render.
+  const [searchInput, setSearchInput] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
+  const debounceTimerRef = useRef(null)
+
+  // rerender-move-effect-to-event: timer management lives in the event handler, not an effect.
+  function handleSearchChange(e) {
+    const value = e.target.value
+    setSearchInput(value)
+    clearTimeout(debounceTimerRef.current)
+    debounceTimerRef.current = setTimeout(() => setDebouncedSearch(value), 300)
+  }
+
+  // Explicit clear skips the debounce — the list should revert immediately.
+  function handleSearchClear() {
+    clearTimeout(debounceTimerRef.current)
+    setSearchInput('')
+    setDebouncedSearch('')
+  }
+
+  // rerender-dependencies: depend on userId + view + activeTagId + debouncedSearch (all primitives)
   useEffect(() => {
     if (!userId) return
 
@@ -91,14 +139,28 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
         .select(`id, title, content, pinned, archived_at, created_at, updated_at, ${tagSelect}`)
 
       if (view === 'active') {
-        query = query
-          .is('archived_at', null)
-          .order('pinned', { ascending: false })
-          .order('updated_at', { ascending: false })
+        query = query.is('archived_at', null)
       } else {
-        query = query
-          .not('archived_at', 'is', null)
-          .order('archived_at', { ascending: false })
+        query = query.not('archived_at', 'is', null)
+      }
+
+      if (debouncedSearch.trim() !== '') {
+        // Full-text search via the generated search_vector column.
+        // 'websearch' maps to websearch_to_tsquery — safely handles arbitrary user input
+        // without tsquery injection (e.g. bare & | ! chars won't cause a parse error).
+        query = query.textSearch('search_vector', debouncedSearch.trim(), {
+          type: 'websearch',
+          config: 'english',
+        })
+      } else {
+        // No search active — use normal sort: pinned first, then most recently updated.
+        if (view === 'active') {
+          query = query
+            .order('pinned', { ascending: false })
+            .order('updated_at', { ascending: false })
+        } else {
+          query = query.order('archived_at', { ascending: false })
+        }
       }
 
       if (activeTagId != null) {
@@ -123,7 +185,7 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
 
     fetchNotes()
     return () => { cancelled = true }
-  }, [userId, view, activeTagId])
+  }, [userId, view, activeTagId, debouncedSearch])
 
   // Expose an imperative handle so App can push a saved note into the list
   // without triggering a network round-trip.
@@ -207,32 +269,51 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
     setNotes(curr => curr.filter(n => n.id !== noteId))
   }, [])
 
-  if (loading) return <p className="notes-status">Loading notes…</p>
-  if (error)   return <p className="notes-status notes-error" role="alert">Error: {error}</p>
+  if (loading) return (
+    <>
+      <SearchBar value={searchInput} onChange={handleSearchChange} onClear={handleSearchClear} />
+      <p className="notes-status">Loading notes…</p>
+    </>
+  )
+  if (error) return (
+    <>
+      <SearchBar value={searchInput} onChange={handleSearchChange} onClear={handleSearchClear} />
+      <p className="notes-status notes-error" role="alert">Error: {error}</p>
+    </>
+  )
 
   if (notes.length === 0) {
+    const emptyMessage = debouncedSearch.trim() !== ''
+      ? `No results for "${debouncedSearch.trim()}".`
+      : view === 'archived'
+        ? 'No archived notes.'
+        : 'No notes yet. Create your first one!'
     return (
-      <p className="notes-status">
-        {view === 'archived' ? 'No archived notes.' : 'No notes yet. Create your first one!'}
-      </p>
+      <>
+        <SearchBar value={searchInput} onChange={handleSearchChange} onClear={handleSearchClear} />
+        <p className="notes-status">{emptyMessage}</p>
+      </>
     )
   }
 
   return (
-    <ul className="notes-list">
-      {notes.map(note => (
-        <NoteItem
-          key={note.id}
-          note={note}
-          view={view}
-          onEdit={onEdit}
-          onTogglePin={handleTogglePin}
-          onArchive={handleArchive}
-          onUnarchive={handleUnarchive}
-          onDeletePermanently={handleDeletePermanently}
-          onTagClick={onTagClick}
-        />
-      ))}
-    </ul>
+    <>
+      <SearchBar value={searchInput} onChange={handleSearchChange} onClear={handleSearchClear} />
+      <ul className="notes-list">
+        {notes.map(note => (
+          <NoteItem
+            key={note.id}
+            note={note}
+            view={view}
+            onEdit={onEdit}
+            onTogglePin={handleTogglePin}
+            onArchive={handleArchive}
+            onUnarchive={handleUnarchive}
+            onDeletePermanently={handleDeletePermanently}
+            onTagClick={onTagClick}
+          />
+        ))}
+      </ul>
+    </>
   )
 }
