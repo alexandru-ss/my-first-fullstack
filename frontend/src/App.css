@@ -584,6 +584,113 @@
   height: 32px;
 }
 
+/* ─── Attachments (NoteEditor) ───────────────────────────────────────────── */
+
+.field-section {
+  margin-top: 12px;
+}
+
+.attachment-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.attachment-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: var(--text-secondary, #888);
+}
+
+.attachment-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-size {
+  font-size: 0.75rem;
+  opacity: 0.7;
+}
+
+.attachment-delete {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--danger, #e53e3e);
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.attachment-uploader {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.attachment-error {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--danger, #e53e3e);
+}
+
+.attachment-hint {
+  margin: 4px 0 0;
+  font-size: 0.8rem;
+  color: var(--text-secondary, #888);
+}
+
+/* ─── Attachment display (NoteItem) ──────────────────────────────────────── */
+
+/* Image thumbnail strip */
+.note-thumbnails-row {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.attachment-thumbnail {
+  width: 80px;
+  height: 80px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--accent-border, #ddd);
+  display: block;
+}
+
+/* File-icon pill row */
+.note-files-row {
+  margin-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.attachment-file-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.8rem;
+  color: var(--text-secondary, #888);
+  max-width: 160px;
+}
+
+.attachment-file-icon .attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .avatar-circle--lg {
   width: 80px;
   height: 80px;

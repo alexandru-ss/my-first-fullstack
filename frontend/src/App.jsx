@@ -152,6 +152,13 @@ export default function App() {
     closeEditor()
   }
 
+  function handleAttachmentsChanged(newAttachments) {
+    // Update the note card immediately when an attachment is added or removed
+    // in the editor, without waiting for the user to press "Save changes".
+    if (!editingNote) return
+    listRef.current?.upsert({ ...editingNote, note_attachments: newAttachments })
+  }
+
   return (
     <div className="app-shell">
       <Header
@@ -209,6 +216,7 @@ export default function App() {
           note={editingNote ?? null}
           onSave={handleSaved}
           onCancel={closeEditor}
+          onAttachmentsChange={handleAttachmentsChanged}
         />
       )}
 

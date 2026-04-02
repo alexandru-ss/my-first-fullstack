@@ -1,5 +1,79 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
+
+const ALLOWED_MIME_TYPES = new Set([
+  'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'application/pdf',
+])
+const MAX_FILE_BYTES = 10 * 1024 * 1024 // 10 MB
+
+function validateFile(file) {
+  if (!ALLOWED_MIME_TYPES.has(file.type)) {
+    return `"${file.type}" is not supported. Upload an image (PNG, JPEG, GIF, WebP) or PDF.`
+  }
+  if (file.size > MAX_FILE_BYTES) {
+    return `File is ${(file.size / 1024 / 1024).toFixed(1)} MB — maximum is 10 MB.`
+  }
+  return null
+}
+
+// rerender-no-inline-components: defined at module scope
+function AttachmentItem({ attachment, onDelete }) {
+  return (
+    <li className="attachment-item">
+      {attachment.mime_type?.startsWith('image/') ? '🖼' : '📄'}
+      <span className="attachment-name">{attachment.file_name}</span>
+      {attachment.size_bytes != null && (
+        <span className="attachment-size">
+          {(attachment.size_bytes / 1024).toFixed(0)} KB
+        </span>
+      )}
+      <button
+        type="button"
+        className="attachment-delete"
+        onClick={() => onDelete(attachment)}
+        aria-label={`Remove ${attachment.file_name}`}
+      >
+        ×
+      </button>
+    </li>
+  )
+}
+
+// rerender-no-inline-components: defined at module scope
+function AttachmentUploader({ uploading, error, onFileSelected }) {
+  const inputRef = useRef(null)
+
+  function handleChange(e) {
+    const file = e.target.files?.[0]
+    if (file) onFileSelected(file)
+    // Reset so the same file can be re-selected after an error
+    e.target.value = ''
+  }
+
+  return (
+    <div className="attachment-uploader">
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/png,image/jpeg,image/gif,image/webp,application/pdf"
+        onChange={handleChange}
+        style={{ display: 'none' }}
+        aria-hidden="true"
+      />
+      <button
+        type="button"
+        className="btn-secondary"
+        onClick={() => inputRef.current?.click()}
+        disabled={uploading}
+      >
+        {uploading ? 'Uploading…' : 'Attach file'}
+      </button>
+      {error && (
+        <p className="attachment-error" role="alert">{error}</p>
+      )}
+    </div>
+  )
+}
 
 // rerender-no-inline-components: TagInput defined at module scope
 function TagInput({ selectedTags, allTags, userId, onChange, onTagCreated, onError }) {
@@ -130,7 +204,7 @@ function TagInput({ selectedTags, allTags, userId, onChange, onTagCreated, onErr
  *   onCancel: () => void
  * }} props
  */
-export function NoteEditor({ userId, note, onSave, onCancel }) {
+export function NoteEditor({ userId, note, onSave, onCancel, onAttachmentsChange }) {
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
   const [pinned, setPinned] = useState(false)
@@ -138,6 +212,20 @@ export function NoteEditor({ userId, note, onSave, onCancel }) {
   const [allTags, setAllTags] = useState([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
+  // ─── Attachment state ────────────────────────────────────────────────────
+  const [attachments, setAttachments] = useState([])
+  const [uploading, setUploading] = useState(false)
+  const [attachError, setAttachError] = useState(null)
+
+  // advanced-use-latest: always read the current onAttachmentsChange without
+  // adding it to callback deps (which would destabilise handleAttach/handleDeleteAttachment).
+  const onAttachmentsChangeRef = useRef(onAttachmentsChange)
+  useEffect(() => { onAttachmentsChangeRef.current = onAttachmentsChange })
+
+  // advanced-use-latest: always read the current attachments list from stable
+  // callbacks without capturing a stale closure.
+  const attachmentsRef = useRef([])
+  useEffect(() => { attachmentsRef.current = attachments }, [attachments])
 
   // rerender-split-combined-hooks: separate effect for allTags (userId dep)
   // from note-field reset effect (note?.id dep)
@@ -167,6 +255,91 @@ export function NoteEditor({ userId, note, onSave, onCancel }) {
     setError(null)
   }, [note?.id])
   /* eslint-enable react-hooks/exhaustive-deps */
+
+  // rerender-split-combined-hooks: fetch attachments separately — only when
+  // editing an existing note (note?.id is truthy).
+  /* eslint-disable react-hooks/exhaustive-deps */
+  useEffect(() => {
+    if (!note?.id) { setAttachments([]); return }
+    supabase
+      .from('note_attachments')
+      .select('id, storage_path, file_name, mime_type, size_bytes, created_at')
+      .eq('note_id', note.id)
+      .order('created_at')
+      .then(({ data }) => { if (data) setAttachments(data) })
+  }, [note?.id])
+  /* eslint-enable react-hooks/exhaustive-deps */
+
+  // rerender-functional-setstate: stable callback, no stale-closure risk
+  const handleAttach = useCallback(async (file) => {
+    setAttachError(null)
+    const validationError = validateFile(file)
+    if (validationError) { setAttachError(validationError); return }
+
+    const safeName = `${Date.now()}_${crypto.randomUUID().slice(0, 8)}_${file.name}`
+    const storagePath = `${userId}/${note.id}/${safeName}`
+
+    setUploading(true)
+    const { error: uploadError } = await supabase.storage
+      .from('attachments')
+      .upload(storagePath, file)
+
+    if (uploadError) {
+      setAttachError(uploadError.message)
+      setUploading(false)
+      return
+    }
+
+    const { data: newRow, error: insertError } = await supabase
+      .from('note_attachments')
+      .insert({
+        note_id: note.id,
+        user_id: userId,
+        storage_path: storagePath,
+        file_name: file.name,
+        mime_type: file.type || null,
+        size_bytes: file.size,
+      })
+      .select('id, storage_path, file_name, mime_type, size_bytes, created_at')
+      .single()
+
+    if (insertError) {
+      setAttachError(insertError.message)
+    } else {
+      // Read current list from ref (avoids stale closure on the callback dep).
+      // Uploads are sequential (button disabled during upload) so ref is current.
+      const next = [...attachmentsRef.current, newRow]
+      setAttachments(next)
+      onAttachmentsChangeRef.current?.(next)
+    }
+    setUploading(false)
+  }, [userId, note?.id])
+
+  // advanced-use-latest: read current list from ref so this callback stays
+  // stable (no attachments dep) while always operating on fresh state.
+  const handleDeleteAttachment = useCallback(async (attachment) => {
+    // Capture current list before optimistic removal for rollback.
+    const prev = attachmentsRef.current
+    const next = prev.filter(a => a.id !== attachment.id)
+    setAttachments(next)
+    onAttachmentsChangeRef.current?.(next)
+
+    // async-parallel: remove from storage and DB simultaneously
+    const [{ error: storageError }, { error: dbError }] = await Promise.all([
+      supabase.storage.from('attachments').remove([attachment.storage_path]),
+      supabase.from('note_attachments').delete().eq('id', attachment.id),
+    ])
+
+    if (storageError || dbError) {
+      // Rollback: restore the removed attachment in its original order
+      const restored = [...prev].toSorted(
+        (a, b) => new Date(a.created_at) - new Date(b.created_at)
+      )
+      setAttachments(restored)
+      onAttachmentsChangeRef.current?.(restored)
+      setAttachError((storageError ?? dbError).message)
+    }
+  }, [])
 
   async function handleSubmit(e) {
     e.preventDefault()
@@ -203,7 +376,9 @@ export function NoteEditor({ userId, note, onSave, onCancel }) {
           if (tagError) throw tagError
         }
 
-        onSave({ ...data, tags: selectedTags })
+        // Pass note_attachments so the note card reflects the current state
+        // immediately without waiting for a refetch.
+        onSave({ ...data, tags: selectedTags, note_attachments: attachments })
       } else {
         // Create — insert note first to get the id, then insert note_tags
         const { data, error: insertError } = await supabase
@@ -221,7 +396,7 @@ export function NoteEditor({ userId, note, onSave, onCancel }) {
           if (tagError) throw tagError
         }
 
-        onSave({ ...data, tags: selectedTags })
+        onSave({ ...data, tags: selectedTags, note_attachments: [] })
       }
     } catch (err) {
       setError(err.message)
@@ -274,6 +449,33 @@ export function NoteEditor({ userId, note, onSave, onCancel }) {
           onTagCreated={newTag => setAllTags(curr => [...curr, newTag].toSorted((a, b) => a.name.localeCompare(b.name)))}
           onError={msg => setError(msg)}
         />
+
+        {/* ─── Attachments ─────────────────────────────────────── */}
+        <div className="field-section">
+          <span className="field-label">Attachments</span>
+          {note?.id ? (
+            <>
+              {attachments.length > 0 && (
+                <ul className="attachment-list">
+                  {attachments.map(a => (
+                    <AttachmentItem
+                      key={a.id}
+                      attachment={a}
+                      onDelete={handleDeleteAttachment}
+                    />
+                  ))}
+                </ul>
+              )}
+              <AttachmentUploader
+                uploading={uploading}
+                error={attachError}
+                onFileSelected={handleAttach}
+              />
+            </>
+          ) : (
+            <p className="attachment-hint">Save the note first to attach files.</p>
+          )}
+        </div>
 
         {error && <p className="auth-error" role="alert">{error}</p>}
 

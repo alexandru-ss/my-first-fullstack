@@ -54,6 +54,28 @@ function NoteItem({ note, view, onEdit, onTogglePin, onArchive, onUnarchive, onD
             ))}
           </div>
         )}
+        {note.note_attachments && note.note_attachments.length > 0 && (() => {
+          const images = note.note_attachments.filter(a => a.mime_type?.startsWith('image/'))
+          const files  = note.note_attachments.filter(a => !a.mime_type?.startsWith('image/'))
+          return (
+            <>
+              {images.length > 0 && (
+                <div className="note-thumbnails-row">
+                  {images.map(a => (
+                    <AttachmentThumbnail key={a.id} storagePath={a.storage_path} fileName={a.file_name} />
+                  ))}
+                </div>
+              )}
+              {files.length > 0 && (
+                <div className="note-files-row">
+                  {files.map(a => (
+                    <AttachmentFileIcon key={a.id} fileName={a.file_name} />
+                  ))}
+                </div>
+              )}
+            </>
+          )
+        })()}
       </div>
       <div className="note-item-actions">
         {view === 'active' ? (
@@ -80,12 +102,45 @@ function NoteItem({ note, view, onEdit, onTogglePin, onArchive, onUnarchive, onD
   )
 }
 
+// rerender-no-inline-components: defined at module scope
+// Generates a signed URL on mount and renders an image thumbnail.
+function AttachmentThumbnail({ storagePath, fileName }) {
+  const [signedUrl, setSignedUrl] = useState(null)
+
+  // rerender-dependencies: storagePath is a string primitive
+  useEffect(() => {
+    supabase.storage
+      .from('attachments')
+      .createSignedUrl(storagePath, 3600)
+      .then(({ data }) => { if (data) setSignedUrl(data.signedUrl) })
+  }, [storagePath])
+
+  if (!signedUrl) return null
+  return (
+    <img
+      src={signedUrl}
+      alt={fileName}
+      className="attachment-thumbnail"
+      loading="lazy"
+    />
+  )
+}
+
+// rerender-no-inline-components: defined at module scope
+function AttachmentFileIcon({ fileName }) {
+  return (
+    <span className="attachment-file-icon" title={fileName}>
+      📄 <span className="attachment-name">{fileName}</span>
+    </span>
+  )
+}
+
 // Module-level helper: fetches a single note with its joined tags by primary key.
 // Used by the Realtime subscription to hydrate tag data missing from raw WAL payloads.
 async function fetchNoteWithTags(noteId) {
   const { data } = await supabase
     .from('notes')
-    .select('id, title, content, pinned, archived_at, created_at, updated_at, note_tags(tag_id, tags(id, name))')
+    .select('id, title, content, pinned, archived_at, created_at, updated_at, note_tags(tag_id, tags(id, name)), note_attachments(id, storage_path, file_name, mime_type)')
     .eq('id', noteId)
     .single()
   if (!data) return null
@@ -174,7 +229,7 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
         ? 'note_tags!inner(tag_id, tags(id, name))'
         : 'note_tags(tag_id, tags(id, name))'
 
-      const selectStr = `id, title, content, pinned, archived_at, created_at, updated_at, ${tagSelect}`
+      const selectStr = `id, title, content, pinned, archived_at, created_at, updated_at, ${tagSelect}, note_attachments(id, storage_path, file_name, mime_type)`
 
       // Search returns all matches (no pagination). Normal browsing paginates with count.
       let query = isSearching
@@ -356,7 +411,7 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
 
     let query = supabase
       .from('notes')
-      .select(`id, title, content, pinned, archived_at, created_at, updated_at, ${tagSelect}`)
+      .select(`id, title, content, pinned, archived_at, created_at, updated_at, ${tagSelect}, note_attachments(id, storage_path, file_name, mime_type)`)
 
     if (view === 'active') {
       query = query
@@ -470,12 +525,28 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
   }, [])
 
   const handleDeletePermanently = useCallback(async (noteId) => {
+    // Read storage paths BEFORE deleting the note. The DB cascade removes the
+    // note_attachments rows when the note is deleted, so we must read them first.
+    const { data: attachments } = await supabase
+      .from('note_attachments')
+      .select('storage_path')
+      .eq('note_id', noteId)
+
     const { error: deleteError } = await supabase
       .from('notes')
       .delete()
       .eq('id', noteId)
 
     if (deleteError) { showError('Failed to delete note. Please try again.'); return }
+
+    // Remove storage files after the note row is confirmed deleted.
+    // storage.remove() accepts an array — deletes all files in one call.
+    if (attachments && attachments.length > 0) {
+      supabase.storage
+        .from('attachments')
+        .remove(attachments.map(a => a.storage_path))
+    }
+
     setNotes(curr => curr.filter(n => n.id !== noteId))
     setTotalCount(c => c !== null ? c - 1 : null)
   }, [])
