@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { supabase } from './lib/supabase'
 import { useAuth } from './hooks/useAuth'
+import { useTheme } from './hooks/useTheme'
 import { AuthForm } from './components/AuthForm'
 import { NotesList } from './components/NotesList'
 import { NoteEditor } from './components/NoteEditor'
@@ -8,12 +9,20 @@ import { ProfileEditor } from './components/ProfileEditor'
 import './App.css'
 
 // rerender-no-inline-components: Header defined at module scope
-function Header({ displayName, email, onOpenProfile, onSignOut }) {
+function Header({ displayName, email, theme, onToggleTheme, onOpenProfile, onSignOut }) {
   return (
     <header className="app-header">
       <span className="app-logo">Notes</span>
       <div className="app-header-right">
         <span className="app-user">{displayName || email}</span>
+        <button
+          className="btn-icon"
+          onClick={onToggleTheme}
+          aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+          title={theme === 'dark' ? 'Light mode' : 'Dark mode'}
+        >
+          {theme === 'dark' ? '☀️' : '🌙'}
+        </button>
         <button className="btn-secondary" onClick={onOpenProfile}>Profile</button>
         <button className="btn-secondary" onClick={onSignOut}>Sign out</button>
       </div>
@@ -23,6 +32,9 @@ function Header({ displayName, email, onOpenProfile, onSignOut }) {
 
 export default function App() {
   const { session, user, loading } = useAuth()
+  // rerender-lazy-state-init: getInitialTheme (reference) passed to useState,
+  // not getInitialTheme() (result), so it only runs once on mount.
+  const { theme, toggleTheme } = useTheme()
   // null = editor closed; undefined = create mode; object = edit mode
   const [editingNote, setEditingNote] = useState(null)
   const [editorOpen, setEditorOpen] = useState(false)
@@ -107,6 +119,8 @@ export default function App() {
       <Header
         displayName={displayName}
         email={user.email}
+        theme={theme}
+        onToggleTheme={toggleTheme}
         onOpenProfile={openProfile}
         onSignOut={handleSignOut}
       />

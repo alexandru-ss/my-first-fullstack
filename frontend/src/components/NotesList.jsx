@@ -80,6 +80,18 @@ function NoteItem({ note, view, onEdit, onTogglePin, onArchive, onUnarchive, onD
   )
 }
 
+// Module-level helper: fetches a single note with its joined tags by primary key.
+// Used by the Realtime subscription to hydrate tag data missing from raw WAL payloads.
+async function fetchNoteWithTags(noteId) {
+  const { data } = await supabase
+    .from('notes')
+    .select('id, title, content, pinned, archived_at, created_at, updated_at, note_tags(tag_id, tags(id, name))')
+    .eq('id', noteId)
+    .single()
+  if (!data) return null
+  return { ...data, tags: (data.note_tags ?? []).map(nt => nt.tags).filter(Boolean) }
+}
+
 const PAGE_SIZE = 10
 
 /**
@@ -258,55 +270,75 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
         'postgres_changes',
         { event: '*', schema: 'public', table: 'notes', filter: `user_id=eq.${userId}` },
         (payload) => {
-          const { eventType, new: newRow, old: oldRow } = payload
-          const currentView = viewRef.current
-          const currentTagId = activeTagIdRef.current
+          // Raw Realtime payloads carry no joined data — use an async IIFE to
+          // fetch the full note (with tags) for INSERT and UPDATE events.
+          ;(async () => {
+            const { eventType, new: newRow, old: oldRow } = payload
+            const currentView = viewRef.current
+            const currentTagId = activeTagIdRef.current
 
-          // ── INSERT ────────────────────────────────────────────────────────
-          if (eventType === 'INSERT') {
-            // Raw Realtime payload has no joined tag data, so we can't verify
-            // the tag filter match without an extra round-trip. Skip the insert
-            // and let the next full fetch reconcile it.
-            if (currentTagId != null) return
-            const noteMatchesView = currentView === 'active'
-              ? newRow.archived_at == null
-              : newRow.archived_at != null
-            if (!noteMatchesView) return
-            const sortFn = currentView === 'active'
-              ? (a, b) => Number(b.pinned) - Number(a.pinned) || new Date(b.updated_at) - new Date(a.updated_at)
-              : (a, b) => new Date(b.archived_at) - new Date(a.archived_at)
-            // rerender-functional-setstate + js-tosorted-immutable
-            setNotes(curr => {
-              // Dedup: same-tab inserts via listRef.upsert() may have already applied this note
-              if (curr.some(n => n.id === newRow.id)) return curr
-              return [{ ...newRow, tags: [] }, ...curr].toSorted(sortFn)
-            })
-            setTotalCount(c => c !== null ? c + 1 : null)
-          }
-
-          // ── UPDATE ────────────────────────────────────────────────────────
-          if (eventType === 'UPDATE') {
-            setNotes(curr => {
-              const existing = curr.find(n => n.id === newRow.id)
-              if (!existing) return curr // note not in the current page/view
+            // ── INSERT ──────────────────────────────────────────────────────
+            if (eventType === 'INSERT') {
               const noteMatchesView = currentView === 'active'
                 ? newRow.archived_at == null
                 : newRow.archived_at != null
-              if (!noteMatchesView) return curr.filter(n => n.id !== newRow.id)
-              // Preserve joined tags (not present in raw Realtime payload)
-              const updated = { ...existing, ...newRow, tags: existing.tags }
+              if (!noteMatchesView) return
+
+              // Fetch with tags so we can enforce the tag filter and render pills correctly
+              const note = await fetchNoteWithTags(newRow.id)
+              if (!note) return
+              if (currentTagId != null && !note.tags.some(t => t.id === currentTagId)) return
+
               const sortFn = currentView === 'active'
                 ? (a, b) => Number(b.pinned) - Number(a.pinned) || new Date(b.updated_at) - new Date(a.updated_at)
                 : (a, b) => new Date(b.archived_at) - new Date(a.archived_at)
-              return curr.map(n => n.id === newRow.id ? updated : n).toSorted(sortFn)
-            })
-          }
+              // rerender-functional-setstate + js-tosorted-immutable
+              setNotes(curr => {
+                // Dedup: same-tab inserts via listRef.upsert() may have already applied this note
+                if (curr.some(n => n.id === note.id)) return curr
+                return [note, ...curr].toSorted(sortFn)
+              })
+              setTotalCount(c => c !== null ? c + 1 : null)
+            }
 
-          // ── DELETE ────────────────────────────────────────────────────────
-          if (eventType === 'DELETE') {
-            setNotes(curr => curr.filter(n => n.id !== oldRow.id))
-            setTotalCount(c => c !== null ? c - 1 : null)
-          }
+            // ── UPDATE ──────────────────────────────────────────────────────
+            if (eventType === 'UPDATE') {
+              const noteMatchesView = currentView === 'active'
+                ? newRow.archived_at == null
+                : newRow.archived_at != null
+
+              if (!noteMatchesView) {
+                // Note moved out of current view (e.g. archived in another tab)
+                setNotes(curr => curr.filter(n => n.id !== newRow.id))
+                return
+              }
+
+              // Fetch with tags so tag changes from other tabs are reflected
+              const note = await fetchNoteWithTags(newRow.id)
+              if (!note) return
+
+              // If a tag filter is active and this note no longer has that tag, remove it
+              if (currentTagId != null && !note.tags.some(t => t.id === currentTagId)) {
+                setNotes(curr => curr.filter(n => n.id !== note.id))
+                setTotalCount(c => c !== null ? c - 1 : null)
+                return
+              }
+
+              const sortFn = currentView === 'active'
+                ? (a, b) => Number(b.pinned) - Number(a.pinned) || new Date(b.updated_at) - new Date(a.updated_at)
+                : (a, b) => new Date(b.archived_at) - new Date(a.archived_at)
+              setNotes(curr => {
+                if (!curr.some(n => n.id === note.id)) return curr
+                return curr.map(n => n.id === note.id ? note : n).toSorted(sortFn)
+              })
+            }
+
+            // ── DELETE ──────────────────────────────────────────────────────
+            if (eventType === 'DELETE') {
+              setNotes(curr => curr.filter(n => n.id !== oldRow.id))
+              setTotalCount(c => c !== null ? c - 1 : null)
+            }
+          })()
         }
       )
       .subscribe()
