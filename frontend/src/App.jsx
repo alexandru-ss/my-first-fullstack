@@ -9,12 +9,23 @@ import { ProfileEditor } from './components/ProfileEditor'
 import './App.css'
 
 // rerender-no-inline-components: Header defined at module scope
-function Header({ displayName, email, theme, onToggleTheme, onOpenProfile, onSignOut }) {
+function Header({ displayName, email, avatarSignedUrl, theme, onToggleTheme, onOpenProfile, onSignOut }) {
+  // rerender-derived-state-no-effect: derive initials during render, not in state
+  const initials = (displayName || email || '?').slice(0, 2).toUpperCase()
   return (
     <header className="app-header">
       <span className="app-logo">Notes</span>
       <div className="app-header-right">
-        <span className="app-user">{displayName || email}</span>
+        <button
+          className="avatar-circle avatar-circle--sm btn-unstyled"
+          onClick={onOpenProfile}
+          aria-label="Open profile"
+          title="Profile"
+        >
+          {avatarSignedUrl
+            ? <img src={avatarSignedUrl} alt="Avatar" />
+            : <span className="avatar-initials">{initials}</span>}
+        </button>
         <button
           className="btn-icon"
           onClick={onToggleTheme}
@@ -23,7 +34,6 @@ function Header({ displayName, email, theme, onToggleTheme, onOpenProfile, onSig
         >
           {theme === 'dark' ? '☀️' : '🌙'}
         </button>
-        <button className="btn-secondary" onClick={onOpenProfile}>Profile</button>
         <button className="btn-secondary" onClick={onSignOut}>Sign out</button>
       </div>
     </header>
@@ -40,6 +50,8 @@ export default function App() {
   const [editorOpen, setEditorOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   const [displayName, setDisplayName] = useState('')
+  const [avatarPath, setAvatarPath] = useState(null)
+  const [avatarSignedUrl, setAvatarSignedUrl] = useState(null)
   const [view, setView] = useState('active')
   const [activeTag, setActiveTag] = useState(null)
   // rerender-dependencies: pass primitive id, not the whole object
@@ -55,13 +67,26 @@ export default function App() {
     if (!userId) return
     supabase
       .from('users')
-      .select('username')
+      .select('username, avatar_path')
       .eq('id', userId)
       .single()
       .then(({ data }) => {
-        if (data) setDisplayName(data.username ?? '')
+        if (data) {
+          setDisplayName(data.username ?? '')
+          setAvatarPath(data.avatar_path ?? null)
+        }
       })
   }, [userId])
+
+  // Generate a fresh signed URL whenever the stored path changes.
+  // Signed URLs are never persisted — only the path lives in the DB.
+  useEffect(() => {
+    if (!avatarPath) { setAvatarSignedUrl(null); return }
+    supabase.storage
+      .from('avatars')
+      .createSignedUrl(avatarPath, 3600)
+      .then(({ data }) => { if (data) setAvatarSignedUrl(data.signedUrl) })
+  }, [avatarPath])
 
   if (loading) {
     return <div className="app-loading">Loading…</div>
@@ -86,6 +111,19 @@ export default function App() {
   function handleProfileSaved(name) {
     setDisplayName(name)
     closeProfile()
+  }
+
+  function handleAvatarSaved(newPath) {
+    setAvatarPath(newPath)
+    // The signed-URL effect only re-runs when avatarPath changes value.
+    // On a re-upload the path is identical (same userId/avatar.png), so the
+    // effect never fires and the header keeps showing the old image from cache.
+    // Always regenerate the signed URL here directly so the new image appears
+    // immediately without a page refresh.
+    supabase.storage
+      .from('avatars')
+      .createSignedUrl(newPath, 3600)
+      .then(({ data }) => { if (data) setAvatarSignedUrl(data.signedUrl) })
   }
 
   function openCreate() {
@@ -119,6 +157,7 @@ export default function App() {
       <Header
         displayName={displayName}
         email={user.email}
+        avatarSignedUrl={avatarSignedUrl}
         theme={theme}
         onToggleTheme={toggleTheme}
         onOpenProfile={openProfile}
@@ -177,7 +216,9 @@ export default function App() {
         <ProfileEditor
           userId={userId}
           displayName={displayName}
+          currentAvatarUrl={avatarSignedUrl}
           onSave={handleProfileSaved}
+          onAvatarSaved={handleAvatarSaved}
           onCancel={closeProfile}
         />
       )}

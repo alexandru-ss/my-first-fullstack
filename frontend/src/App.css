@@ -566,4 +566,126 @@
   to   { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 
+/* ── Avatar circle ───────────────────────────────────────────────────────── */
+
+.avatar-circle {
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--accent-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border: 1px solid var(--accent-border);
+}
+
+.avatar-circle--sm {
+  width: 32px;
+  height: 32px;
+}
+
+.avatar-circle--lg {
+  width: 80px;
+  height: 80px;
+}
+
+/* Wrapper that provides the positioning anchor for the camera button.
+   Lives outside .avatar-circle so overflow:hidden doesn't clip it. */
+.avatar-upload-area {
+  position: relative;
+  display: inline-flex;
+}
+
+.avatar-circle img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.avatar-initials {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--accent);
+  line-height: 1;
+  user-select: none;
+}
+
+.avatar-circle--lg .avatar-initials {
+  font-size: 1.4rem;
+}
+
+/* ── Avatar upload (profile editor) ─────────────────────────────────────── */
+
+.avatar-upload-wrapper {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.avatar-camera-btn {
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--bg);
+  border: 1.5px solid var(--accent-border);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+
+  /* SVG is inline by default; block removes the inline baseline gap
+     so the flex centering acts on the actual pixel bounds. */
+  svg { display: block; }
+
+  &:hover { background: var(--accent-bg); }
+}
+
+.avatar-spinner-overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1;
+}
+
+/* ── Spinner ─────────────────────────────────────────────────────────────── */
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.spinner {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+/* ── Unstyled button (avatar circle in header) ───────────────────────────── */
+
+.btn-unstyled {
+  font: inherit;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+
+  &:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+}
 
