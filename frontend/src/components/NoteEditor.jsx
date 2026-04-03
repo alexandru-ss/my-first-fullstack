@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
+import { FilePreviewOverlay } from './FilePreview'
 
 const ALLOWED_MIME_TYPES = new Set([
   'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'application/pdf',
@@ -18,24 +19,67 @@ function validateFile(file) {
 
 // rerender-no-inline-components: defined at module scope
 function AttachmentItem({ attachment, onDelete }) {
+  const [previewUrl, setPreviewUrl] = useState(null)
+  const [fetchingPreview, setFetchingPreview] = useState(false)
+
+  async function handleOpenPreview() {
+    if (fetchingPreview) return
+    setFetchingPreview(true)
+    const { data } = await supabase.storage
+      .from('attachments')
+      .createSignedUrl(attachment.storage_path, 3600)
+    setFetchingPreview(false)
+    if (!data?.signedUrl) return
+    if (attachment.mime_type === 'application/pdf') {
+      window.open(data.signedUrl, '_blank', 'noopener,noreferrer')
+    } else {
+      setPreviewUrl(data.signedUrl)
+    }
+  }
+
   return (
-    <li className="attachment-item">
-      {attachment.mime_type?.startsWith('image/') ? '🖼' : '📄'}
-      <span className="attachment-name">{attachment.file_name}</span>
-      {attachment.size_bytes != null && (
-        <span className="attachment-size">
-          {(attachment.size_bytes / 1024).toFixed(0)} KB
-        </span>
+    <>
+      {previewUrl && (
+        <FilePreviewOverlay
+          url={previewUrl}
+          fileName={attachment.file_name}
+          onClose={() => setPreviewUrl(null)}
+        />
       )}
-      <button
-        type="button"
-        className="attachment-delete"
-        onClick={() => onDelete(attachment)}
-        aria-label={`Remove ${attachment.file_name}`}
-      >
-        ×
-      </button>
-    </li>
+      <li className="attachment-item">
+        <button
+          type="button"
+          className="attachment-preview-btn"
+          onClick={handleOpenPreview}
+          disabled={fetchingPreview}
+          aria-label={`Preview ${attachment.file_name}`}
+        >
+          {attachment.mime_type?.startsWith('image/') ? '🖼' : '📄'}
+        </button>
+        <button
+          type="button"
+          className="attachment-preview-btn attachment-name"
+          onClick={handleOpenPreview}
+          disabled={fetchingPreview}
+          title={attachment.file_name}
+        >
+          {fetchingPreview ? 'Loading…' : attachment.file_name}
+        </button>
+        {attachment.size_bytes != null && (
+          <span className="attachment-size">
+            {(attachment.size_bytes / 1024).toFixed(0)} KB
+          </span>
+        )}
+        <button
+          type="button"
+          className="attachment-delete"
+          onClick={() => onDelete(attachment)}
+          aria-label={`Remove ${attachment.file_name}`}
+        >
+          ×
+        </button>
+      </li>
+    </>
   )
 }
 
@@ -258,6 +302,10 @@ export function NoteEditor({ userId, note, onSave, onCancel, onAttachmentsChange
 
   // rerender-split-combined-hooks: fetch attachments separately — only when
   // editing an existing note (note?.id is truthy).
+  // After the fetch we also call onAttachmentsChangeRef to sync the note card
+  // with the DB truth. This corrects any stale list state on the card caused
+  // by Realtime events that were missed or arrived out of order (e.g. a delete
+  // that happened in another tab before the event:* subscription was in place).
   /* eslint-disable react-hooks/exhaustive-deps */
   useEffect(() => {
     if (!note?.id) { setAttachments([]); return }
@@ -266,7 +314,14 @@ export function NoteEditor({ userId, note, onSave, onCancel, onAttachmentsChange
       .select('id, storage_path, file_name, mime_type, size_bytes, created_at')
       .eq('note_id', note.id)
       .order('created_at')
-      .then(({ data }) => { if (data) setAttachments(data) })
+      .then(({ data }) => {
+        if (data) {
+          setAttachments(data)
+          // Reconcile the note card: if local state has a ghost attachment (or
+          // is missing a newly-added one), replace it with the DB truth now.
+          onAttachmentsChangeRef.current?.(data)
+        }
+      })
   }, [note?.id])
   /* eslint-enable react-hooks/exhaustive-deps */
 

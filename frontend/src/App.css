@@ -683,6 +683,16 @@
   font-size: 0.8rem;
   color: var(--text-secondary, #888);
   max-width: 160px;
+  /* button reset */
+  background: none;
+  border: none;
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+
+  &:hover { opacity: 0.75; }
+  &:disabled { cursor: default; opacity: 1; }
+  &:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
 }
 
 .attachment-file-icon .attachment-name {
@@ -796,3 +806,85 @@
   &:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 }
 
+/* ─── File preview overlay ───────────────────────────────────────────────── */
+
+.preview-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.88);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+
+.preview-image {
+  max-width: min(90vw, 1200px);
+  max-height: 90vh;
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 8px 48px rgba(0, 0, 0, 0.7);
+  display: block;
+}
+
+.preview-close {
+  position: fixed;
+  top: 16px;
+  right: 20px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  &:hover { background: rgba(255, 255, 255, 0.3); }
+  &:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+}
+
+/* ─── Clickable attachment thumbnail (NoteItem card) ─────────────────────── */
+
+.attachment-thumbnail-btn {
+  all: unset;
+  display: block;
+  border-radius: 6px;
+  cursor: pointer;
+  line-height: 0; /* removes inline gap below the img */
+
+  &:hover .attachment-thumbnail { opacity: 0.85; }
+  &:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+}
+
+/* ─── Clickable icon/name in the editor attachment list ──────────────────── */
+
+.attachment-preview-btn {
+  background: none;
+  border: none;
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text-secondary, #888);
+
+  &:hover { opacity: 0.75; }
+  &:disabled { cursor: default; opacity: 1; }
+  &:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+}
+
+/* When used as the file name span it must replicate .attachment-name layout */
+.attachment-preview-btn.attachment-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  font-size: 0.85rem;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+}

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
+import { FilePreviewOverlay } from './FilePreview'
 
 // rerender-no-inline-components: SearchBar defined at module scope, receives props
 function SearchBar({ value, onChange, onClear }) {
@@ -69,7 +70,7 @@ function NoteItem({ note, view, onEdit, onTogglePin, onArchive, onUnarchive, onD
               {files.length > 0 && (
                 <div className="note-files-row">
                   {files.map(a => (
-                    <AttachmentFileIcon key={a.id} fileName={a.file_name} />
+                    <AttachmentFileIcon key={a.id} storagePath={a.storage_path} fileName={a.file_name} />
                   ))}
                 </div>
               )}
@@ -103,9 +104,11 @@ function NoteItem({ note, view, onEdit, onTogglePin, onArchive, onUnarchive, onD
 }
 
 // rerender-no-inline-components: defined at module scope
-// Generates a signed URL on mount and renders an image thumbnail.
+// Generates a signed URL on mount and renders a clickable image thumbnail.
+// Clicking opens the full-size image in FilePreviewOverlay.
 function AttachmentThumbnail({ storagePath, fileName }) {
   const [signedUrl, setSignedUrl] = useState(null)
+  const [previewOpen, setPreviewOpen] = useState(false)
 
   // rerender-dependencies: storagePath is a string primitive
   useEffect(() => {
@@ -117,21 +120,59 @@ function AttachmentThumbnail({ storagePath, fileName }) {
 
   if (!signedUrl) return null
   return (
-    <img
-      src={signedUrl}
-      alt={fileName}
-      className="attachment-thumbnail"
-      loading="lazy"
-    />
+    <>
+      {previewOpen && (
+        <FilePreviewOverlay
+          url={signedUrl}
+          fileName={fileName}
+          onClose={() => setPreviewOpen(false)}
+        />
+      )}
+      <button
+        type="button"
+        className="attachment-thumbnail-btn"
+        onClick={() => setPreviewOpen(true)}
+        aria-label={`Preview ${fileName}`}
+      >
+        <img
+          src={signedUrl}
+          alt={fileName}
+          className="attachment-thumbnail"
+          loading="lazy"
+        />
+      </button>
+    </>
   )
 }
 
 // rerender-no-inline-components: defined at module scope
-function AttachmentFileIcon({ fileName }) {
+// Renders a clickable pill for non-image attachments.
+// Clicking fetches a signed URL and opens the file in a new tab.
+function AttachmentFileIcon({ storagePath, fileName }) {
+  const [fetchingUrl, setFetchingUrl] = useState(false)
+
+  async function handleOpen() {
+    if (fetchingUrl) return
+    setFetchingUrl(true)
+    const { data } = await supabase.storage
+      .from('attachments')
+      .createSignedUrl(storagePath, 3600)
+    setFetchingUrl(false)
+    if (data?.signedUrl) {
+      window.open(data.signedUrl, '_blank', 'noopener,noreferrer')
+    }
+  }
+
   return (
-    <span className="attachment-file-icon" title={fileName}>
-      📄 <span className="attachment-name">{fileName}</span>
-    </span>
+    <button
+      type="button"
+      className="attachment-file-icon"
+      title={fileName}
+      onClick={handleOpen}
+      disabled={fetchingUrl}
+    >
+      📄 <span className="attachment-name">{fetchingUrl ? 'Opening…' : fileName}</span>
+    </button>
   )
 }
 
@@ -321,6 +362,52 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
 
     const channel = supabase
       .channel(`notes-realtime-${userId}`)
+      // ── note_attachments INSERT / DELETE ────────────────────────────────
+      // A single event:'*' subscription is used intentionally.
+      // Supabase Realtime deduplicates postgres_changes subscriptions by
+      // (channel, table) on the server — registering INSERT and DELETE as
+      // separate .on() calls on the same channel causes only the first one
+      // to be honoured, so DELETE events would never arrive in other tabs.
+      // Using event:'*' ensures both event types travel through one registered
+      // subscription and are dispatched client-side by eventType.
+      //
+      // INSERT: locate parent note and append the new row, deduplicating by id
+      //   so same-tab optimistic adds (via onAttachmentsChange) aren't doubled.
+      // DELETE: REPLICA IDENTITY FULL (migration 009) puts the full old row in
+      //   the payload, including note_id, so we can locate the parent note and
+      //   remove the correct attachment without an extra fetch.
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'note_attachments', filter: `user_id=eq.${userId}` },
+        ({ eventType, new: newRow, old: oldRow }) => {
+          if (eventType === 'INSERT') {
+            setNotes(curr =>
+              curr.map(n => {
+                if (n.id !== newRow.note_id) return n
+                const already = (n.note_attachments ?? []).some(a => a.id === newRow.id)
+                if (already) return n
+                return {
+                  ...n,
+                  note_attachments: [
+                    ...(n.note_attachments ?? []),
+                    { id: newRow.id, storage_path: newRow.storage_path, file_name: newRow.file_name, mime_type: newRow.mime_type },
+                  ],
+                }
+              })
+            )
+          } else if (eventType === 'DELETE') {
+            setNotes(curr =>
+              curr.map(n => {
+                if (n.id !== oldRow.note_id) return n
+                return {
+                  ...n,
+                  note_attachments: (n.note_attachments ?? []).filter(a => a.id !== oldRow.id),
+                }
+              })
+            )
+          }
+        }
+      )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'notes', filter: `user_id=eq.${userId}` },
