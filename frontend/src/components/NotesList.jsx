@@ -29,7 +29,7 @@ function SearchBar({ value, onChange, onClear }) {
 }
 
 // rerender-no-inline-components: NoteItem defined at module scope, receives props
-function NoteItem({ note, view, onEdit, onTogglePin, onArchive, onUnarchive, onDeletePermanently, onTagClick }) {
+function NoteItem({ note, view, onEdit, onTogglePin, onArchive, onUnarchive, onDeletePermanently, onTagClick, onShare }) {
   const dateValue = view === 'archived' ? note.archived_at : note.updated_at
   return (
     <li className={`note-item${note.pinned && view === 'active' ? ' note-item--pinned' : ''}`}>
@@ -90,6 +90,7 @@ function NoteItem({ note, view, onEdit, onTogglePin, onArchive, onUnarchive, onD
               📌
             </button>
             <button className="btn-secondary" onClick={() => onEdit(note)}>Edit</button>
+            <button className="btn-secondary" onClick={() => onShare(note)}>Share</button>
             <button className="btn-secondary" onClick={() => onArchive(note)}>Archive</button>
           </>
         ) : (
@@ -106,7 +107,7 @@ function NoteItem({ note, view, onEdit, onTogglePin, onArchive, onUnarchive, onD
 // rerender-no-inline-components: defined at module scope
 // Generates a signed URL on mount and renders a clickable image thumbnail.
 // Clicking opens the full-size image in FilePreviewOverlay.
-function AttachmentThumbnail({ storagePath, fileName }) {
+export function AttachmentThumbnail({ storagePath, fileName }) {
   const [signedUrl, setSignedUrl] = useState(null)
   const [previewOpen, setPreviewOpen] = useState(false)
 
@@ -148,7 +149,7 @@ function AttachmentThumbnail({ storagePath, fileName }) {
 // rerender-no-inline-components: defined at module scope
 // Renders a clickable pill for non-image attachments.
 // Clicking fetches a signed URL and opens the file in a new tab.
-function AttachmentFileIcon({ storagePath, fileName }) {
+export function AttachmentFileIcon({ storagePath, fileName }) {
   const [fetchingUrl, setFetchingUrl] = useState(false)
 
   async function handleOpen() {
@@ -202,7 +203,7 @@ const PAGE_SIZE = 10
  *   onTagClick: (tag: object) => void
  * }} props
  */
-export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listRef }) {
+export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, onShare, listRef }) {
   const [notes, setNotes] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -273,9 +274,13 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
       const selectStr = `id, title, content, pinned, archived_at, created_at, updated_at, ${tagSelect}, note_attachments(id, storage_path, file_name, mime_type)`
 
       // Search returns all matches (no pagination). Normal browsing paginates with count.
+      // Always filter by user_id so NotesList only shows the owner's own notes.
+      // Shared notes are displayed exclusively in SharedNotesList ("Shared with me" tab).
+      // Without this explicit filter, the extended RLS policy (which also permits
+      // shared users to read notes) would cause shared notes to leak into this list.
       let query = isSearching
-        ? supabase.from('notes').select(selectStr)
-        : supabase.from('notes').select(selectStr, { count: 'exact' })
+        ? supabase.from('notes').select(selectStr).eq('user_id', userId)
+        : supabase.from('notes').select(selectStr, { count: 'exact' }).eq('user_id', userId)
 
       if (view === 'active') {
         query = query.is('archived_at', null)
@@ -499,6 +504,7 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
     let query = supabase
       .from('notes')
       .select(`id, title, content, pinned, archived_at, created_at, updated_at, ${tagSelect}, note_attachments(id, storage_path, file_name, mime_type)`)
+      .eq('user_id', userId)
 
     if (view === 'active') {
       query = query
@@ -678,6 +684,7 @@ export function NotesList({ userId, view, activeTagId, onEdit, onTagClick, listR
             note={note}
             view={view}
             onEdit={onEdit}
+            onShare={onShare}
             onTogglePin={handleTogglePin}
             onArchive={handleArchive}
             onUnarchive={handleUnarchive}

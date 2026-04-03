@@ -6,6 +6,8 @@ import { AuthForm } from './components/AuthForm'
 import { NotesList } from './components/NotesList'
 import { NoteEditor } from './components/NoteEditor'
 import { ProfileEditor } from './components/ProfileEditor'
+import { SharePanel } from './components/SharePanel'
+import { SharedNotesList } from './components/SharedNotesList'
 import './App.css'
 
 // rerender-no-inline-components: Header defined at module scope
@@ -56,10 +58,16 @@ export default function App() {
   const [activeTag, setActiveTag] = useState(null)
   // rerender-dependencies: pass primitive id, not the whole object
   const activeTagId = activeTag?.id ?? null
+  // sharingNote: note to show in SharePanel; null = panel closed
+  const [sharingNote, setSharingNote] = useState(null)
+  // editSharePermission: null (owner editing) | 'edit' (shared-editor editing)
+  const [editSharePermission, setEditSharePermission] = useState(null)
 
   // Imperative ref so NoteEditor can push a saved note into NotesList
   // without a network re-fetch (async-parallel / avoiding waterfall)
   const listRef = useRef(null)
+  // Imperative ref for SharedNotesList — used when a shared editor saves
+  const sharedListRef = useRef(null)
 
   // rerender-dependencies: depend on user?.id (string primitive)
   const userId = user?.id ?? null
@@ -128,17 +136,24 @@ export default function App() {
 
   function openCreate() {
     setEditingNote(undefined)
+    setEditSharePermission(null)
     setEditorOpen(true)
   }
 
-  function openEdit(note) {
+  function openEdit(note, sharePermission = null) {
     setEditingNote(note)
+    setEditSharePermission(sharePermission)
     setEditorOpen(true)
+  }
+
+  function openShare(note) {
+    setSharingNote(note)
   }
 
   function closeEditor() {
     setEditorOpen(false)
     setEditingNote(null)
+    setEditSharePermission(null)
   }
 
   function handleTagClick(tag) {
@@ -147,8 +162,13 @@ export default function App() {
   }
 
   function handleSaved(savedNote) {
-    // Push into the list optimistically — no extra network round-trip
-    listRef.current?.upsert(savedNote)
+    // Route the optimistic update to the correct list depending on whether
+    // the editor was opened from the shared list or the owner list.
+    if (editSharePermission !== null) {
+      sharedListRef.current?.upsert(savedNote)
+    } else {
+      listRef.current?.upsert(savedNote)
+    }
     closeEditor()
   }
 
@@ -156,7 +176,11 @@ export default function App() {
     // Update the note card immediately when an attachment is added or removed
     // in the editor, without waiting for the user to press "Save changes".
     if (!editingNote) return
-    listRef.current?.upsert({ ...editingNote, note_attachments: newAttachments })
+    if (editSharePermission !== null) {
+      sharedListRef.current?.upsert({ ...editingNote, note_attachments: newAttachments })
+    } else {
+      listRef.current?.upsert({ ...editingNote, note_attachments: newAttachments })
+    }
   }
 
   return (
@@ -186,6 +210,12 @@ export default function App() {
             >
               Archived
             </button>
+            <button
+              className={`tab-btn${view === 'shared' ? ' tab-btn--active' : ''}`}
+              onClick={() => setView('shared')}
+            >
+              Shared with me
+            </button>
           </div>
           {view === 'active' ? (
             <button className="btn-primary" onClick={openCreate}>+ New note</button>
@@ -200,14 +230,23 @@ export default function App() {
         ) : null}
 
         {/* rerender-dependencies: pass user.id (string) not user (object) */}
-        <NotesList
-          userId={userId}
-          view={view}
-          activeTagId={activeTagId}
-          onEdit={openEdit}
-          onTagClick={handleTagClick}
-          listRef={listRef}
-        />
+        {view !== 'shared' ? (
+          <NotesList
+            userId={userId}
+            view={view}
+            activeTagId={activeTagId}
+            onEdit={openEdit}
+            onTagClick={handleTagClick}
+            onShare={openShare}
+            listRef={listRef}
+          />
+        ) : (
+          <SharedNotesList
+            userId={userId}
+            onEdit={(note, perm) => openEdit(note, perm)}
+            sharedListRef={sharedListRef}
+          />
+        )}
       </main>
 
       {editorOpen && (
@@ -218,6 +257,16 @@ export default function App() {
           onCancel={closeEditor}
           onAttachmentsChange={handleAttachmentsChanged}
           onTagDeleted={tag => { if (activeTag?.id === tag.id) setActiveTag(null) }}
+          sharePermission={editSharePermission}
+        />
+      )}
+
+      {sharingNote && (
+        <SharePanel
+          noteId={sharingNote.id}
+          noteTitle={sharingNote.title}
+          userEmail={user.email}
+          onClose={() => setSharingNote(null)}
         />
       )}
 

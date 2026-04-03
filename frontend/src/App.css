@@ -915,3 +915,103 @@
   text-decoration-style: dotted;
   text-underline-offset: 2px;
 }
+
+/* ─── Note sharing ───────────────────────────────────────────────────────── */
+
+/* Extra-small avatar size for inline "Shared by" labels */
+.avatar-circle--xs {
+  width: 22px;
+  height: 22px;
+}
+
+.avatar-circle--xs .avatar-initials {
+  font-size: 0.6rem;
+}
+
+/* Row showing owner avatar + "Shared by" text on a shared note card */
+.shared-by-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-size: 0.8rem;
+  color: var(--text-secondary, #888);
+}
+
+.shared-by-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Permission badge — reused in SharePanel rows and SharedNoteItem */
+.share-row-permission {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: 9999px;
+  white-space: nowrap;
+}
+
+.share-row-permission--view {
+  background: var(--accent-bg, #e8f0fe);
+  color: var(--accent, #3b82f6);
+}
+
+.share-row-permission--edit {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+/* SharePanel overlay — reuses .editor-overlay backdrop approach */
+.share-panel {
+  max-width: 440px;
+  width: 100%;
+}
+
+/* Existing shares section within SharePanel */
+.share-existing {
+  margin-top: 20px;
+  border-top: 1px solid var(--accent-border, #ddd);
+  padding-top: 14px;
+}
+
+.share-existing-heading {
+  margin: 0 0 10px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-secondary, #888);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.share-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.share-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.875rem;
+}
+
+.share-row-email {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.share-row-revoke {
+  padding: 2px 8px;
+  font-size: 0.8rem;
+}

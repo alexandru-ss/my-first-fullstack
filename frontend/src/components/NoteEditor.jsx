@@ -70,14 +70,16 @@ function AttachmentItem({ attachment, onDelete }) {
             {(attachment.size_bytes / 1024).toFixed(0)} KB
           </span>
         )}
-        <button
-          type="button"
-          className="attachment-delete"
-          onClick={() => onDelete(attachment)}
-          aria-label={`Remove ${attachment.file_name}`}
-        >
-          ×
-        </button>
+        {onDelete && (
+          <button
+            type="button"
+            className="attachment-delete"
+            onClick={() => onDelete(attachment)}
+            aria-label={`Remove ${attachment.file_name}`}
+          >
+            ×
+          </button>
+        )}
       </li>
     </>
   )
@@ -263,7 +265,9 @@ function TagInput({ selectedTags, allTags, userId, onChange, onTagCreated, onTag
  *   onCancel: () => void
  * }} props
  */
-export function NoteEditor({ userId, note, onSave, onCancel, onAttachmentsChange, onTagDeleted }) {
+export function NoteEditor({ userId, note, onSave, onCancel, onAttachmentsChange, onTagDeleted, sharePermission }) {
+  // sharePermission: null (owner) | 'edit' (shared editor)
+  // When 'edit': restrict to title + content only; hide pin, tags, attachment management.
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
   const [pinned, setPinned] = useState(false)
@@ -417,38 +421,60 @@ export function NoteEditor({ userId, note, onSave, onCancel, onAttachmentsChange
     setBusy(true)
 
     try {
-      const payload = {
-        user_id: userId,
-        title: title.trim(),
-        content: content.trim() || null,
-        pinned,
-        updated_at: new Date().toISOString(),
-      }
+      // Shared editors can only update title + content; they cannot change
+      // ownership, pin state, or anything else.
+      const payload = sharePermission === 'edit'
+        ? {
+            title:      title.trim(),
+            content:    content.trim() || null,
+            updated_at: new Date().toISOString(),
+          }
+        : {
+            user_id:    userId,
+            title:      title.trim(),
+            content:    content.trim() || null,
+            pinned,
+            updated_at: new Date().toISOString(),
+          }
 
       if (note) {
-        // Edit — run note update AND note_tags delete in parallel (async-parallel)
-        const [{ data, error: upsertError }] = await Promise.all([
-          supabase
+        if (sharePermission === 'edit') {
+          // Shared editor: update only, no tag operations
+          const { data, error: upsertError } = await supabase
             .from('notes')
             .update(payload)
             .eq('id', note.id)
             .select('id, title, content, pinned, archived_at, created_at, updated_at')
-            .single(),
-          supabase.from('note_tags').delete().eq('note_id', note.id),
-        ])
+            .single()
 
-        if (upsertError) throw upsertError
+          if (upsertError) throw upsertError
 
-        if (selectedTags.length > 0) {
-          const { error: tagError } = await supabase
-            .from('note_tags')
-            .insert(selectedTags.map(t => ({ note_id: data.id, tag_id: t.id })))
-          if (tagError) throw tagError
+          onSave({ ...data, tags: note.tags ?? [], note_attachments: attachments })
+        } else {
+          // Owner: run note update AND note_tags delete in parallel (async-parallel)
+          const [{ data, error: upsertError }] = await Promise.all([
+            supabase
+              .from('notes')
+              .update(payload)
+              .eq('id', note.id)
+              .select('id, title, content, pinned, archived_at, created_at, updated_at')
+              .single(),
+            supabase.from('note_tags').delete().eq('note_id', note.id),
+          ])
+
+          if (upsertError) throw upsertError
+
+          if (selectedTags.length > 0) {
+            const { error: tagError } = await supabase
+              .from('note_tags')
+              .insert(selectedTags.map(t => ({ note_id: data.id, tag_id: t.id })))
+            if (tagError) throw tagError
+          }
+
+          // Pass note_attachments so the note card reflects the current state
+          // immediately without waiting for a refetch.
+          onSave({ ...data, tags: selectedTags, note_attachments: attachments })
         }
-
-        // Pass note_attachments so the note card reflects the current state
-        // immediately without waiting for a refetch.
-        onSave({ ...data, tags: selectedTags, note_attachments: attachments })
       } else {
         // Create — insert note first to get the id, then insert note_tags
         const { data, error: insertError } = await supabase
@@ -500,30 +526,35 @@ export function NoteEditor({ userId, note, onSave, onCancel, onAttachmentsChange
           onChange={e => setContent(e.target.value)}
         />
 
-        <div className="field-checkbox">
-          <input
-            id="note-pinned"
-            type="checkbox"
-            checked={pinned}
-            onChange={e => setPinned(e.target.checked)}
-          />
-          <label htmlFor="note-pinned">Pin this note</label>
-        </div>
+        {/* Pin and Tags are hidden for shared editors — those are owner-only fields */}
+        {sharePermission !== 'edit' && (
+          <>
+            <div className="field-checkbox">
+              <input
+                id="note-pinned"
+                type="checkbox"
+                checked={pinned}
+                onChange={e => setPinned(e.target.checked)}
+              />
+              <label htmlFor="note-pinned">Pin this note</label>
+            </div>
 
-        <label className="field-label">Tags</label>
-        <TagInput
-          selectedTags={selectedTags}
-          allTags={allTags}
-          userId={userId}
-          onChange={setSelectedTags}
-          onTagCreated={newTag => setAllTags(curr => [...curr, newTag].toSorted((a, b) => a.name.localeCompare(b.name)))}
-          onTagDeleted={deletedTag => {
-            setAllTags(curr => curr.filter(t => t.id !== deletedTag.id))
-            setSelectedTags(curr => curr.filter(t => t.id !== deletedTag.id))
-            onTagDeleted?.(deletedTag)
-          }}
-          onError={msg => setError(msg)}
-        />
+            <label className="field-label">Tags</label>
+            <TagInput
+              selectedTags={selectedTags}
+              allTags={allTags}
+              userId={userId}
+              onChange={setSelectedTags}
+              onTagCreated={newTag => setAllTags(curr => [...curr, newTag].toSorted((a, b) => a.name.localeCompare(b.name)))}
+              onTagDeleted={deletedTag => {
+                setAllTags(curr => curr.filter(t => t.id !== deletedTag.id))
+                setSelectedTags(curr => curr.filter(t => t.id !== deletedTag.id))
+                onTagDeleted?.(deletedTag)
+              }}
+              onError={msg => setError(msg)}
+            />
+          </>
+        )}
 
         {/* ─── Attachments ─────────────────────────────────────── */}
         <div className="field-section">
@@ -536,16 +567,19 @@ export function NoteEditor({ userId, note, onSave, onCancel, onAttachmentsChange
                     <AttachmentItem
                       key={a.id}
                       attachment={a}
-                      onDelete={handleDeleteAttachment}
+                      onDelete={sharePermission === 'edit' ? null : handleDeleteAttachment}
                     />
                   ))}
                 </ul>
               )}
-              <AttachmentUploader
-                uploading={uploading}
-                error={attachError}
-                onFileSelected={handleAttach}
-              />
+              {/* Shared editors cannot upload new attachments */}
+              {sharePermission !== 'edit' && (
+                <AttachmentUploader
+                  uploading={uploading}
+                  error={attachError}
+                  onFileSelected={handleAttach}
+                />
+              )}
             </>
           ) : (
             <p className="attachment-hint">Save the note first to attach files.</p>
