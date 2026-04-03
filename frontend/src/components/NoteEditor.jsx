@@ -120,7 +120,7 @@ function AttachmentUploader({ uploading, error, onFileSelected }) {
 }
 
 // rerender-no-inline-components: TagInput defined at module scope
-function TagInput({ selectedTags, allTags, userId, onChange, onTagCreated, onError }) {
+function TagInput({ selectedTags, allTags, userId, onChange, onTagCreated, onTagDeleted, onError }) {
   const [input, setInput] = useState('')
   const [open, setOpen] = useState(false)
 
@@ -137,6 +137,15 @@ function TagInput({ selectedTags, allTags, userId, onChange, onTagCreated, onErr
 
   const exactMatch = allTags.some(t => t.name.toLowerCase() === lowerInput)
   const showCreate = lowerInput.length > 0 && !exactMatch
+
+  async function handleDelete(tag) {
+    const { error } = await supabase.from('tags').delete().eq('id', tag.id)
+    if (error) {
+      onError?.(error.message)
+    } else {
+      onTagDeleted?.(tag)
+    }
+  }
 
   async function handleCreate() {
     const name = lowerInput
@@ -213,13 +222,19 @@ function TagInput({ selectedTags, allTags, userId, onChange, onTagCreated, onErr
         {open && (suggestions.length > 0 || showCreate) && (
           <ul className="tag-dropdown" role="listbox">
             {suggestions.map(tag => (
-              <li
-                key={tag.id}
-                className="tag-dropdown-item"
-                onMouseDown={() => handleSelect(tag)}
-                role="option"
-              >
-                {tag.name}
+              <li key={tag.id} className="tag-dropdown-item" role="option">
+                <span
+                  className="tag-dropdown-label"
+                  onMouseDown={() => handleSelect(tag)}
+                >
+                  {tag.name}
+                </span>
+                <button
+                  type="button"
+                  className="tag-dropdown-delete"
+                  onMouseDown={e => { e.preventDefault(); handleDelete(tag) }}
+                  aria-label={`Delete tag ${tag.name}`}
+                >×</button>
               </li>
             ))}
             {showCreate && (
@@ -248,7 +263,7 @@ function TagInput({ selectedTags, allTags, userId, onChange, onTagCreated, onErr
  *   onCancel: () => void
  * }} props
  */
-export function NoteEditor({ userId, note, onSave, onCancel, onAttachmentsChange }) {
+export function NoteEditor({ userId, note, onSave, onCancel, onAttachmentsChange, onTagDeleted }) {
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
   const [pinned, setPinned] = useState(false)
@@ -502,6 +517,11 @@ export function NoteEditor({ userId, note, onSave, onCancel, onAttachmentsChange
           userId={userId}
           onChange={setSelectedTags}
           onTagCreated={newTag => setAllTags(curr => [...curr, newTag].toSorted((a, b) => a.name.localeCompare(b.name)))}
+          onTagDeleted={deletedTag => {
+            setAllTags(curr => curr.filter(t => t.id !== deletedTag.id))
+            setSelectedTags(curr => curr.filter(t => t.id !== deletedTag.id))
+            onTagDeleted?.(deletedTag)
+          }}
           onError={msg => setError(msg)}
         />
 

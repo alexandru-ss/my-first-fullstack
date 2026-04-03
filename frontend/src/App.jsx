@@ -217,6 +217,7 @@ export default function App() {
           onSave={handleSaved}
           onCancel={closeEditor}
           onAttachmentsChange={handleAttachmentsChanged}
+          onTagDeleted={tag => { if (activeTag?.id === tag.id) setActiveTag(null) }}
         />
       )}
 
