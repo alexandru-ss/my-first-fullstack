@@ -1,4 +1,4 @@
-import { useEffect, useImperativeHandle, useState } from 'react'
+import { useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { AttachmentThumbnail, AttachmentFileIcon } from './NotesList'
 
@@ -236,6 +236,204 @@ export function SharedNotesList({ userId, onEdit, sharedListRef }) {
 
     return () => { supabase.removeChannel(channel) }
   }, [userId])
+
+  // Stable dep key: changes only when the SET of note owners changes (e.g. a new
+  // share from a previously-unseen owner, or the last share from an owner is
+  // revoked). It does NOT change when attachment rows are added/removed, which
+  // is important — we use it as the dependency for the INSERT effect below so
+  // that attaching/removing a file does not needlessly tear down and recreate
+  // the INSERT channels.
+  const ownerIdKey = shareRecords
+    .map(r => r.note?.users?.id)
+    .filter(Boolean)
+    .filter((v, i, a) => a.indexOf(v) === i) // deduplicate
+    .sort()
+    .join(',')
+
+  // Stable dep key for the set of shared note IDs. Used for the DELETE effect.
+  // Changes only when notes are added to / removed from the shared list.
+  const noteIdKey = shareRecords
+    .map(r => r.note?.id)
+    .filter(Boolean)
+    .sort((a, b) => a - b)
+    .join(',')
+
+  // advanced-use-latest: always read the current set of shared note IDs in the
+  // DELETE handler without recreating the channel on every attachment state change.
+  const sharedNoteIdsRef = useRef(new Set())
+  useEffect(() => {
+    sharedNoteIdsRef.current = new Set(
+      shareRecords.map(r => r.note?.id).filter(Boolean).map(Number)
+    )
+  }, [shareRecords])
+
+  // rerender-split-combined-hooks: INSERT and DELETE use fundamentally different
+  // subscription strategies because Supabase Realtime column filters do not apply
+  // to DELETE events (documented Realtime limitation: "Delete events are not
+  // filterable"). Only INSERT events honour server-side column filters.
+  //
+  // INSERT effect: one channel per unique note owner, filtered by user_id.
+  //   Server-side filter `user_id=eq.<ownerId>` narrows the event stream to only
+  //   the owner's attachments so we don't receive unrelated INSERT noise.
+  //   Client-side check on note_id skips events for notes not shared with us.
+  //
+  // DELETE effect (separate): subscribes with NO column filter so that walrus
+  //   delivers the event unconditionally. REPLICA IDENTITY FULL (migration 009)
+  //   ensures the full old row — including note_id — is present in the payload.
+  //   Client-side check (sharedNoteIdsRef) discards events for notes we don't
+  //   have access to. This is safe: deleted attachment metadata (file_name,
+  //   mime_type, storage_path) is not more sensitive than what is already
+  //   visible to authenticated users via their session; RLS on REST API reads
+  //   still enforces proper access control.
+  //
+  // Number() coercion: Supabase Realtime serialises bigint columns as JSON
+  // strings in some versions. The initial REST fetch returns them as numbers.
+  // Number() normalises both so the strict !== comparison works correctly.
+
+  // ── INSERT subscription (per-owner filtered channels) ───────────────────
+  useEffect(() => {
+    if (!userId || !ownerIdKey) return
+
+    const ownerIds = ownerIdKey.split(',')
+
+    const channels = ownerIds.map(ownerId =>
+      supabase
+        .channel(`shared-attach-insert-${userId}-${ownerId}`)
+        .on(
+          'postgres_changes',
+          { event: 'INSERT', schema: 'public', table: 'note_attachments', filter: `user_id=eq.${ownerId}` },
+          ({ new: newRow }) => {
+            const noteId   = Number(newRow.note_id)
+            const attachId = Number(newRow.id)
+            setShareRecords(curr =>
+              curr.map(r => {
+                if (r.note?.id !== noteId) return r
+                // Dedup: same-tab owner edits may have already applied this row
+                const already = (r.note.note_attachments ?? []).some(a => Number(a.id) === attachId)
+                if (already) return r
+                return {
+                  ...r,
+                  note: {
+                    ...r.note,
+                    note_attachments: [
+                      ...(r.note.note_attachments ?? []),
+                      {
+                        id:           newRow.id,
+                        storage_path: newRow.storage_path,
+                        file_name:    newRow.file_name,
+                        mime_type:    newRow.mime_type,
+                      },
+                    ],
+                  },
+                }
+              })
+            )
+          }
+        )
+        .subscribe()
+    )
+
+    return () => { channels.forEach(ch => supabase.removeChannel(ch)) }
+  // ownerIdKey changes only when the set of owners changes, not on every
+  // attachment update, so this effect is not re-triggered by its own state writes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, ownerIdKey])
+
+  // ── DELETE subscription (unfiltered — filters don't work for DELETE) ────
+  useEffect(() => {
+    if (!userId || !noteIdKey) return
+
+    const channel = supabase
+      .channel(`shared-attach-delete-${userId}`)
+      .on(
+        'postgres_changes',
+        { event: 'DELETE', schema: 'public', table: 'note_attachments' },
+        ({ old: oldRow }) => {
+          const noteId   = Number(oldRow.note_id)
+          const attachId = Number(oldRow.id)
+          // Discard events for notes not in our shared set
+          if (!sharedNoteIdsRef.current.has(noteId)) return
+          setShareRecords(curr =>
+            curr.map(r => {
+              if (r.note?.id !== noteId) return r
+              return {
+                ...r,
+                note: {
+                  ...r.note,
+                  note_attachments: (r.note.note_attachments ?? []).filter(
+                    a => Number(a.id) !== attachId
+                  ),
+                },
+              }
+            })
+          )
+        }
+      )
+      .subscribe()
+
+    return () => { supabase.removeChannel(channel) }
+  // noteIdKey changes only when the set of shared notes changes, not on every
+  // attachment update, so this effect is not re-triggered by its own state writes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, noteIdKey])
+
+  // ── notes UPDATE subscription (title / content edits by the owner) ──────
+  //
+  // When user A edits a shared note's title or content and saves, walrus emits
+  // an UPDATE event on the notes table. SharedNotesList has no subscription to
+  // that table, so user B's card never reflected the change without a refresh.
+  //
+  // Filter: id=in.(noteId1,noteId2,...) — the "Contained in list" Realtime
+  // filter (backed by Postgres `= ANY`) limits delivery to exactly the notes
+  // that are shared with this user. Supabase supports up to 100 values per in()
+  // filter; SharedNotesList is bounded by a user's share count, so this is safe.
+  //
+  // UPDATE events carry the full new row in the payload (the row exists in the
+  // table, so walrus can run RLS and serialise all columns). The "notes: select
+  // own or shared" policy (extended in migration 010) permits user B to read
+  // any note they have a share record for, so walrus delivers the event.
+  //
+  // We merge only scalar fields from the WAL payload; joined data
+  // (note_attachments, users) is NOT present in the raw Realtime payload and
+  // must be preserved from existing state.
+  //
+  // Dedup: when user B (edit permission) saves from NoteEditor, App calls
+  // sharedListRef.upsert() before this event arrives. Reapplying the same
+  // scalar values is idempotent and harmless.
+  useEffect(() => {
+    if (!userId || !noteIdKey) return
+
+    const channel = supabase
+      .channel(`shared-notes-content-${userId}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'notes', filter: `id=in.(${noteIdKey})` },
+        ({ new: newRow }) => {
+          const noteId = Number(newRow.id)
+          setShareRecords(curr =>
+            curr.map(r => {
+              if (r.note?.id !== noteId) return r
+              return {
+                ...r,
+                note: {
+                  ...r.note,
+                  title:       newRow.title,
+                  content:     newRow.content,
+                  updated_at:  newRow.updated_at,
+                  archived_at: newRow.archived_at,
+                },
+              }
+            })
+          )
+        }
+      )
+      .subscribe()
+
+    return () => { supabase.removeChannel(channel) }
+  // noteIdKey changes only when the set of shared notes changes, not on every
+  // field update — this effect is not re-triggered by its own state writes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, noteIdKey])
 
   // Expose upsert so App can update a note after the shared editor saves it,
   // without triggering a network round-trip.

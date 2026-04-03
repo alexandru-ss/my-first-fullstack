@@ -344,6 +344,80 @@ export function NoteEditor({ userId, note, onSave, onCancel, onAttachmentsChange
   }, [note?.id])
   /* eslint-enable react-hooks/exhaustive-deps */
 
+  // rerender-split-combined-hooks: Realtime subscription for attachment changes
+  // made by the note owner while a shared editor has the editor open.
+  //
+  // When sharePermission is set the current user is NOT the owner:
+  //   · They cannot upload or delete attachments (UI buttons are hidden).
+  //   · The owner may still add / remove attachments concurrently.
+  // Without this effect, user B's editor shows a stale attachment list until
+  // the editor is closed or the page is refreshed.
+  //
+  // Supabase Realtime does not apply column filters to DELETE events (documented
+  // limitation: "Delete events are not filterable"). If we used event:'*' with a
+  // note_id filter, the INSERT behaviour would work but the DELETE event would
+  // never be delivered to a non-owner subscriber.
+  //
+  // Solution: two separate .on() registrations on the same channel:
+  //   INSERT — filtered by note_id so we only get inserts for this note.
+  //   DELETE — no filter; walrus delivers all DELETE events unconditionally
+  //             because it cannot evaluate RLS on a row that no longer exists.
+  //             Client-side check (note?.id) discards events for other notes.
+  //             REPLICA IDENTITY FULL (migration 009) ensures the full old row —
+  //             including id — is present in the payload so we can locate the
+  //             correct attachment to remove.
+  //
+  // Note: contrary to the previous implementation concern, Supabase Realtime
+  // DOES honour multiple .on() calls when they register *different* event types
+  // (INSERT vs DELETE). The dedup issue only affects registering the same event
+  // type twice on the same channel (e.g. two separate event:'INSERT' handlers).
+  useEffect(() => {
+    if (!note?.id || sharePermission === null) return
+
+    const channel = supabase
+      .channel(`note-editor-attachments-${note.id}`)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'note_attachments', filter: `note_id=eq.${note.id}` },
+        ({ new: newRow }) => {
+          const insertId = Number(newRow.id)
+          // Dedup: same-tab optimistic adds (unlikely for shared editors, but safe)
+          if (attachmentsRef.current.some(a => Number(a.id) === insertId)) return
+          const next = [
+            ...attachmentsRef.current,
+            {
+              id:           newRow.id,
+              storage_path: newRow.storage_path,
+              file_name:    newRow.file_name,
+              mime_type:    newRow.mime_type,
+              size_bytes:   newRow.size_bytes,
+              created_at:   newRow.created_at,
+            },
+          ]
+          setAttachments(next)
+          onAttachmentsChangeRef.current?.(next)
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'DELETE', schema: 'public', table: 'note_attachments' },
+        ({ old: oldRow }) => {
+          // Client-side guard: discard events for attachments that belong to
+          // other notes (no server-side filter is possible for DELETE events).
+          if (Number(oldRow.note_id) !== Number(note.id)) return
+          // Number() normalises bigint columns that Realtime may serialise as
+          // strings in some versions (same pattern as SharedNotesList).
+          const attachId = Number(oldRow.id)
+          const next = attachmentsRef.current.filter(a => Number(a.id) !== attachId)
+          setAttachments(next)
+          onAttachmentsChangeRef.current?.(next)
+        }
+      )
+      .subscribe()
+
+    return () => { supabase.removeChannel(channel) }
+  }, [note?.id, sharePermission])
+
   // rerender-functional-setstate: stable callback, no stale-closure risk
   const handleAttach = useCallback(async (file) => {
     setAttachError(null)
