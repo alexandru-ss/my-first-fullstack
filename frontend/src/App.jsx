@@ -11,6 +11,8 @@ import { SharePanel } from './components/SharePanel'
 import { SharedNotesList } from './components/SharedNotesList'
 import { DocumentsList } from './components/DocumentsList'
 import { DocumentEditorRoute } from './components/DocumentEditor'
+import { DocumentSharePanel } from './components/DocumentSharePanel'
+import { SharedDocumentsList } from './components/SharedDocumentsList'
 import './App.css'
 
 // rerender-no-inline-components: Header defined at module scope
@@ -86,8 +88,12 @@ export default function App() {
   const activeTagId = activeTag?.id ?? null
   // sharingNote: note to show in SharePanel; null = panel closed
   const [sharingNote, setSharingNote] = useState(null)
+  // sharingDocument: document to show in DocumentSharePanel; null = panel closed
+  const [sharingDocument, setSharingDocument] = useState(null)
   // editSharePermission: null (owner editing) | 'edit' (shared-editor editing)
   const [editSharePermission, setEditSharePermission] = useState(null)
+  // docView: which tab is active on the /documents page
+  const [docView, setDocView] = useState('own')
 
   // Imperative ref so NoteEditor can push a saved note into NotesList
   // without a network re-fetch (async-parallel / avoiding waterfall)
@@ -281,17 +287,39 @@ export default function App() {
           <Route path="/documents" element={
             <>
               <div className="notes-toolbar">
-                <Link to="/documents/new" className="btn-primary">+ New document</Link>
+                <div className="notes-tabs">
+                  <button
+                    className={`tab-btn${docView === 'own' ? ' tab-btn--active' : ''}`}
+                    onClick={() => setDocView('own')}
+                  >
+                    My Documents
+                  </button>
+                  <button
+                    className={`tab-btn${docView === 'shared' ? ' tab-btn--active' : ''}`}
+                    onClick={() => setDocView('shared')}
+                  >
+                    Shared with me
+                  </button>
+                </div>
+                {docView === 'own' ? (
+                  <Link to="/documents/new" className="btn-primary">+ New document</Link>
+                ) : null}
               </div>
 
-              {/* rerender-dependencies: pass user.id (string) not user (object) */}
-              <DocumentsList userId={userId} />
+              {docView === 'own' ? (
+                <DocumentsList userId={userId} />
+              ) : (
+                <SharedDocumentsList userId={userId} />
+              )}
             </>
           } />
         </Route>
         <Route element={<FullLayout />}>
           <Route path="/documents/:id" element={
-            <DocumentEditorRoute userId={userId} />
+            <DocumentEditorRoute
+              userId={userId}
+              onOpenShare={doc => setSharingDocument(doc)}
+            />
           } />
         </Route>
       </Routes>
@@ -314,6 +342,15 @@ export default function App() {
           noteTitle={sharingNote.title}
           userEmail={user.email}
           onClose={() => setSharingNote(null)}
+        />
+      )}
+
+      {sharingDocument && (
+        <DocumentSharePanel
+          documentId={sharingDocument.id}
+          documentTitle={sharingDocument.title}
+          userEmail={user.email}
+          onClose={() => setSharingDocument(null)}
         />
       )}
 

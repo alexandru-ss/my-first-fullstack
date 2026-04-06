@@ -102,20 +102,23 @@ function wrapSelection(textarea, before, after) {
 /**
  * Route wrapper that reads the document ID from the URL, fetches the document
  * (or renders a blank editor for /documents/new), and passes it to DocumentEditor.
+ * Also checks document_shares to determine the calling user's permission level.
  *
- * @param {{ userId: string }} props
+ * @param {{ userId: string, onOpenShare: (doc: object) => void }} props
  */
-export function DocumentEditorRoute({ userId }) {
+export function DocumentEditorRoute({ userId, onOpenShare }) {
   const { id } = useParams()
   const navigate = useNavigate()
   const isNew = id === 'new'
   const [doc, setDoc] = useState(null)
+  const [sharePermission, setSharePermission] = useState(null)
   const [loading, setLoading] = useState(!isNew)
   const [fetchError, setFetchError] = useState(null)
 
   useEffect(() => {
     if (isNew) {
       setDoc(null)
+      setSharePermission(null)
       setLoading(false)
       setFetchError(null)
       return
@@ -124,30 +127,46 @@ export function DocumentEditorRoute({ userId }) {
     // Reset state when id changes (e.g. after creating a new doc and navigating to its real ID)
     setLoading(true)
     setDoc(null)
+    setSharePermission(null)
     setFetchError(null)
 
     let cancelled = false
 
-    supabase
-      .from('documents')
-      .select('id, title, body, created_at, updated_at')
-      .eq('id', id)
-      .single()
-      .then(({ data, error }) => {
-        if (cancelled) return
-        if (error) {
-          setFetchError(error.message)
-        } else {
-          setDoc(data)
+    // async-parallel: fetch document + share permission in parallel
+    Promise.all([
+      supabase
+        .from('documents')
+        .select('id, user_id, title, body, created_at, updated_at')
+        .eq('id', id)
+        .single(),
+      supabase
+        .from('document_shares')
+        .select('permission')
+        .eq('document_id', id)
+        .eq('shared_with_id', userId)
+        .maybeSingle(),
+    ]).then(([docResult, shareResult]) => {
+      if (cancelled) return
+      if (docResult.error) {
+        setFetchError(docResult.error.message)
+      } else {
+        setDoc(docResult.data)
+        // If the caller is the owner, sharePermission stays null (full access).
+        // Otherwise use the share record's permission ('view' or 'edit').
+        if (docResult.data.user_id !== userId && shareResult.data) {
+          setSharePermission(shareResult.data.permission)
         }
-        setLoading(false)
-      })
+      }
+      setLoading(false)
+    })
 
     return () => { cancelled = true }
-  }, [id, isNew])
+  }, [id, isNew, userId])
 
   if (loading) return <p className="notes-status">Loading document…</p>
   if (fetchError) return <p className="notes-status notes-error">{fetchError}</p>
+
+  const isOwner = !doc || doc.user_id === userId
 
   return (
     <DocumentEditor
@@ -155,20 +174,31 @@ export function DocumentEditorRoute({ userId }) {
       userId={userId}
       document={doc}
       navigate={navigate}
+      sharePermission={isOwner ? null : sharePermission}
+      onOpenShare={isOwner ? onOpenShare : null}
     />
   )
 }
 
 /**
  * Split-pane Markdown editor with live GFM preview and auto-save.
+ * Supports three modes based on sharePermission:
+ *   - null (owner): full editor + Share button
+ *   - 'edit': full editor, no Share button
+ *   - 'view': read-only full-width preview, no editor pane
  *
  * @param {{
  *   userId: string,
  *   document: object | null,
  *   navigate: (path: string, opts?: object) => void,
+ *   sharePermission: string | null,
+ *   onOpenShare: ((doc: object) => void) | null,
  * }} props
  */
-export function DocumentEditor({ userId, document: doc, navigate }) {
+export function DocumentEditor({ userId, document: doc, navigate, sharePermission, onOpenShare }) {
+  const isViewOnly = sharePermission === 'view'
+  const canEdit = sharePermission === null || sharePermission === 'edit'
+
   const [title, setTitle] = useState(doc?.title ?? '')
   const [body, setBody] = useState(doc?.body ?? '')
   // After first auto-save of a new doc, store its id so subsequent saves are updates.
@@ -193,6 +223,8 @@ export function DocumentEditor({ userId, document: doc, navigate }) {
   const savedBody = useRef(body)
 
   useEffect(() => {
+    // View-only mode: never auto-save
+    if (isViewOnly) return
     // Nothing changed from what's saved → skip (also handles initial mount)
     if (title === savedTitle.current && body === savedBody.current) {
       return
@@ -254,7 +286,7 @@ export function DocumentEditor({ userId, document: doc, navigate }) {
       cancelled = true
       clearTimeout(timer)
     }
-  }, [title, body]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [title, body, isViewOnly]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Clear "Saved" indicator after 2 s
   useEffect(() => {
@@ -262,6 +294,62 @@ export function DocumentEditor({ userId, document: doc, navigate }) {
     const timer = setTimeout(() => setSaveStatus('idle'), 2000)
     return () => clearTimeout(timer)
   }, [saveStatus])
+
+  // ── Realtime: live updates for ALL users viewing this document ──────
+  // Subscribe to document UPDATE events so every open editor/viewer sees
+  // changes saved by another user in real time.
+  //
+  // Conflict strategy (simple "last save wins"):
+  //   - View-only users always accept incoming updates (they can't edit).
+  //   - Editable users (owner or shared-edit) accept incoming updates ONLY
+  //     when they have no pending unsaved changes (local state === saved
+  //     state). This avoids clobbering mid-typing edits while still
+  //     reflecting the other user's saves when the local user is idle.
+  //   - Self-echo is naturally filtered: after a successful save,
+  //     savedTitle/savedBody already match the incoming Realtime payload,
+  //     so `newRow.title !== savedTitle.current` is false → no-op.
+
+  // Refs to track current local values without adding them to the effect
+  // dependency array (which would tear down the channel on every keystroke).
+  const titleRef = useRef(title)
+  const bodyRef  = useRef(body)
+  titleRef.current = title
+  bodyRef.current  = body
+
+  useEffect(() => {
+    if (!docId) return
+
+    const channel = supabase
+      .channel(`doc-editor-rt-${docId}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'documents', filter: `id=eq.${docId}` },
+        ({ new: newRow }) => {
+          // View-only: always apply (user cannot edit, no conflict possible)
+          if (isViewOnly) {
+            if (newRow.title != null) { savedTitle.current = newRow.title; setTitle(newRow.title) }
+            if (newRow.body  != null) { savedBody.current  = newRow.body;  setBody(newRow.body)   }
+            return
+          }
+
+          // Editable user: only apply if there are no unsaved local changes.
+          // This avoids overwriting text the user is currently typing.
+          const titleDirty = titleRef.current !== savedTitle.current
+          const bodyDirty  = bodyRef.current  !== savedBody.current
+          if (!titleDirty && newRow.title != null && newRow.title !== savedTitle.current) {
+            savedTitle.current = newRow.title
+            setTitle(newRow.title)
+          }
+          if (!bodyDirty && newRow.body != null && newRow.body !== savedBody.current) {
+            savedBody.current = newRow.body
+            setBody(newRow.body)
+          }
+        }
+      )
+      .subscribe()
+
+    return () => { supabase.removeChannel(channel) }
+  }, [docId, isViewOnly])
 
   // ── Keyboard shortcuts ────────────────────────────────────────────────────
   function handleKeyDown(e) {
@@ -284,48 +372,72 @@ export function DocumentEditor({ userId, document: doc, navigate }) {
         <Link className="btn-secondary" to="/documents">
           ← Back
         </Link>
-        <input
-          className="doc-title-input"
-          type="text"
-          placeholder="Document title"
-          value={title}
-          onChange={e => setTitle(e.target.value)}
-          autoFocus
-        />
-        <span className={`doc-save-status doc-save-status--${saveStatus}`}>
-          {saveStatus === 'saving' && 'Saving…'}
-          {saveStatus === 'saved' && 'Saved'}
-          {saveStatus === 'error' && 'Save failed'}
-        </span>
+        {canEdit ? (
+          <input
+            className="doc-title-input"
+            type="text"
+            placeholder="Document title"
+            value={title}
+            onChange={e => setTitle(e.target.value)}
+            autoFocus
+          />
+        ) : (
+          <h1 className="doc-title-readonly">{title || 'Untitled'}</h1>
+        )}
+        {onOpenShare && docId && (
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => onOpenShare({ id: docId, title })}
+          >
+            Share
+          </button>
+        )}
+        {canEdit && (
+          <span className={`doc-save-status doc-save-status--${saveStatus}`}>
+            {saveStatus === 'saving' && 'Saving…'}
+            {saveStatus === 'saved' && 'Saved'}
+            {saveStatus === 'error' && 'Save failed'}
+          </span>
+        )}
       </div>
 
       {error && <p className="field-error doc-editor-error">{error}</p>}
 
-      {/* ── Split pane ──────────────────────────────────────────────── */}
-      <div className="doc-editor-split" ref={containerRef}>
-        <div className="doc-editor-pane">
-          <textarea
-            ref={textareaRef}
-            className="doc-editor-textarea"
-            placeholder="Write Markdown here…"
-            value={body}
-            onChange={e => setBody(e.target.value)}
-            onKeyDown={handleKeyDown}
-            spellCheck={false}
+      {/* ── View-only: full-width preview ──────────────────────────── */}
+      {isViewOnly ? (
+        <div className="doc-editor-split doc-editor-split--readonly">
+          <div className="doc-editor-pane doc-editor-pane--preview doc-editor-pane--preview-only">
+            <Preview markdown={body} />
+          </div>
+        </div>
+      ) : (
+        /* ── Split pane (owner or edit permission) ─────────────────── */
+        <div className="doc-editor-split" ref={containerRef}>
+          <div className="doc-editor-pane">
+            <textarea
+              ref={textareaRef}
+              className="doc-editor-textarea"
+              placeholder="Write Markdown here…"
+              value={body}
+              onChange={e => setBody(e.target.value)}
+              onKeyDown={handleKeyDown}
+              spellCheck={false}
+            />
+          </div>
+
+          <div
+            className="doc-editor-divider"
+            onMouseDown={onMouseDown}
+            role="separator"
+            aria-orientation="vertical"
           />
-        </div>
 
-        <div
-          className="doc-editor-divider"
-          onMouseDown={onMouseDown}
-          role="separator"
-          aria-orientation="vertical"
-        />
-
-        <div className="doc-editor-pane doc-editor-pane--preview">
-          <Preview markdown={deferredBody} />
+          <div className="doc-editor-pane doc-editor-pane--preview">
+            <Preview markdown={deferredBody} />
+          </div>
         </div>
-      </div>
+      )}
     </div>
   )
 }

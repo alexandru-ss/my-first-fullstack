@@ -975,6 +975,18 @@
   color: #b45309;
 }
 
+/* Inline permission selector for existing shares (DocumentSharePanel) */
+.share-row-permission-select {
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 2px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+
 /* SharePanel overlay — reuses .editor-overlay backdrop approach */
 .share-panel {
   max-width: 440px;
@@ -1183,6 +1195,31 @@
 .doc-editor-pane--preview {
   border-left: none; /* divider already provides the visual separation */
   background: var(--bg);
+}
+
+/* View-only mode: preview takes full width, no editor pane or divider */
+.doc-editor-split--readonly {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.doc-editor-pane--preview-only {
+  flex: 1 !important;
+  max-width: 100%;
+}
+
+/* Read-only title display for view-only mode */
+.doc-title-readonly {
+  flex: 1;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-h);
+  margin: 0;
+  padding: 0 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .doc-preview {
