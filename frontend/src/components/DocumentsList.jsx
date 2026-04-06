@@ -1,18 +1,16 @@
-import { useEffect, useImperativeHandle, useState } from 'react'
+import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 
 // rerender-no-inline-components: DocumentItem defined at module scope
-function DocumentItem({ doc, onEdit, onDelete }) {
+function DocumentItem({ doc, onDelete }) {
   const preview = doc.body
     ? doc.body.length > 120 ? doc.body.slice(0, 120) + '…' : doc.body
     : ''
 
   return (
     <li className="note-item doc-item">
-      <div className="note-item-body" role="button" tabIndex={0}
-        onClick={() => onEdit(doc)}
-        onKeyDown={e => { if (e.key === 'Enter') onEdit(doc) }}
-      >
+      <Link className="note-item-body" to={`/documents/${doc.id}`}>
         <h3 className="note-title">{doc.title || 'Untitled'}</h3>
         {preview && <p className="note-content">{preview}</p>}
         <time className="note-date" dateTime={doc.updated_at}>
@@ -20,7 +18,7 @@ function DocumentItem({ doc, onEdit, onDelete }) {
             year: 'numeric', month: 'short', day: 'numeric',
           })}
         </time>
-      </div>
+      </Link>
       <div className="note-item-actions">
         <button className="btn-danger" onClick={() => onDelete(doc.id)}>Delete</button>
       </div>
@@ -30,16 +28,11 @@ function DocumentItem({ doc, onEdit, onDelete }) {
 
 /**
  * Fetches and displays documents for the given user.
- * Exposes an imperative `upsert` handle so App can push saved documents
- * into the list without a network re-fetch.
+ * List updates arrive via Supabase realtime subscription.
  *
- * @param {{
- *   userId: string,
- *   onEdit: (doc: object) => void,
- *   listRef: import('react').RefObject
- * }} props
+ * @param {{ userId: string }} props
  */
-export function DocumentsList({ userId, onEdit, listRef }) {
+export function DocumentsList({ userId }) {
   const [documents, setDocuments] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -73,24 +66,6 @@ export function DocumentsList({ userId, onEdit, listRef }) {
     fetchDocuments()
     return () => { cancelled = true }
   }, [userId])
-
-  // Imperative handle for optimistic updates from the editor
-  // rerender-functional-setstate: functional form so this callback never stales
-  useImperativeHandle(listRef, () => ({
-    upsert: (savedDoc) => {
-      setDocuments(curr => {
-        const merged = curr.findIndex(d => d.id === savedDoc.id) === -1
-          ? [savedDoc, ...curr]
-          : curr.map(d => d.id === savedDoc.id ? savedDoc : d)
-        return merged.toSorted((a, b) =>
-          new Date(b.updated_at) - new Date(a.updated_at)
-        )
-      })
-    },
-    remove: (docId) => {
-      setDocuments(curr => curr.filter(d => d.id !== docId))
-    },
-  }), [])
 
   // rerender-split-combined-hooks: Realtime subscription has a different lifecycle
   // from the fetch effect — only recreated when the signed-in user changes.
@@ -153,7 +128,6 @@ export function DocumentsList({ userId, onEdit, listRef }) {
         <DocumentItem
           key={doc.id}
           doc={doc}
-          onEdit={onEdit}
           onDelete={handleDelete}
         />
       ))}

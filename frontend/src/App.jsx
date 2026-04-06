@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { Routes, Route, NavLink, Link } from 'react-router-dom'
 import { supabase } from './lib/supabase'
 import { useAuth } from './hooks/useAuth'
 import { useTheme } from './hooks/useTheme'
@@ -9,28 +10,29 @@ import { ProfileEditor } from './components/ProfileEditor'
 import { SharePanel } from './components/SharePanel'
 import { SharedNotesList } from './components/SharedNotesList'
 import { DocumentsList } from './components/DocumentsList'
-import { DocumentEditor } from './components/DocumentEditor'
+import { DocumentEditorRoute } from './components/DocumentEditor'
 import './App.css'
 
 // rerender-no-inline-components: Header defined at module scope
-function Header({ displayName, email, avatarSignedUrl, theme, onToggleTheme, onOpenProfile, onSignOut, section, onSectionChange }) {
+function Header({ displayName, email, avatarSignedUrl, theme, onToggleTheme, onOpenProfile, onSignOut }) {
   // rerender-derived-state-no-effect: derive initials during render, not in state
   const initials = (displayName || email || '?').slice(0, 2).toUpperCase()
   return (
     <header className="app-header">
       <div className="section-toggle">
-        <button
-          className={`section-btn${section === 'notes' ? ' section-btn--active' : ''}`}
-          onClick={() => onSectionChange('notes')}
+        <NavLink
+          to="/"
+          end
+          className={({ isActive }) => `section-btn${isActive ? ' section-btn--active' : ''}`}
         >
           Notes
-        </button>
-        <button
-          className={`section-btn${section === 'documents' ? ' section-btn--active' : ''}`}
-          onClick={() => onSectionChange('documents')}
+        </NavLink>
+        <NavLink
+          to="/documents"
+          className={({ isActive }) => `section-btn${isActive ? ' section-btn--active' : ''}`}
         >
           Documents
-        </button>
+        </NavLink>
       </div>
       <div className="app-header-right">
         <button
@@ -77,12 +79,6 @@ export default function App() {
   const [sharingNote, setSharingNote] = useState(null)
   // editSharePermission: null (owner editing) | 'edit' (shared-editor editing)
   const [editSharePermission, setEditSharePermission] = useState(null)
-
-  // ── Documents state ──────────────────────────────────────────────────────
-  const [section, setSection] = useState('notes')
-  const [editingDoc, setEditingDoc] = useState(null)
-  const [docEditorOpen, setDocEditorOpen] = useState(false)
-  const docListRef = useRef(null)
 
   // Imperative ref so NoteEditor can push a saved note into NotesList
   // without a network re-fetch (async-parallel / avoiding waterfall)
@@ -193,27 +189,6 @@ export default function App() {
     closeEditor()
   }
 
-  // ── Document handlers ──────────────────────────────────────────────────
-  function openCreateDoc() {
-    setEditingDoc(null)
-    setDocEditorOpen(true)
-  }
-
-  function openEditDoc(doc) {
-    setEditingDoc(doc)
-    setDocEditorOpen(true)
-  }
-
-  function closeDocEditor() {
-    setDocEditorOpen(false)
-    setEditingDoc(null)
-  }
-
-  function handleDocSaved(savedDoc) {
-    docListRef.current?.upsert(savedDoc)
-    // Editor stays open — auto-save keeps it alive until user clicks "Back"
-  }
-
   function handleAttachmentsChanged(newAttachments) {
     // Update the note card immediately when an attachment is added or removed
     // in the editor, without waiting for the user to press "Save changes".
@@ -235,79 +210,79 @@ export default function App() {
         onToggleTheme={toggleTheme}
         onOpenProfile={openProfile}
         onSignOut={handleSignOut}
-        section={section}
-        onSectionChange={setSection}
       />
 
       <main className="app-main">
-        {section === 'notes' ? (
-          <>
-            <div className="notes-toolbar">
-              <div className="notes-tabs">
-                <button
-                  className={`tab-btn${view === 'active' ? ' tab-btn--active' : ''}`}
-                  onClick={() => setView('active')}
-                >
-                  Notes
-                </button>
-                <button
-                  className={`tab-btn${view === 'archived' ? ' tab-btn--active' : ''}`}
-                  onClick={() => setView('archived')}
-                >
-                  Archived
-                </button>
-                <button
-                  className={`tab-btn${view === 'shared' ? ' tab-btn--active' : ''}`}
-                  onClick={() => setView('shared')}
-                >
-                  Shared with me
-                </button>
+        <Routes>
+          <Route path="/" element={
+            <>
+              <div className="notes-toolbar">
+                <div className="notes-tabs">
+                  <button
+                    className={`tab-btn${view === 'active' ? ' tab-btn--active' : ''}`}
+                    onClick={() => setView('active')}
+                  >
+                    Notes
+                  </button>
+                  <button
+                    className={`tab-btn${view === 'archived' ? ' tab-btn--active' : ''}`}
+                    onClick={() => setView('archived')}
+                  >
+                    Archived
+                  </button>
+                  <button
+                    className={`tab-btn${view === 'shared' ? ' tab-btn--active' : ''}`}
+                    onClick={() => setView('shared')}
+                  >
+                    Shared with me
+                  </button>
+                </div>
+                {view === 'active' ? (
+                  <button className="btn-primary" onClick={openCreate}>+ New note</button>
+                ) : null}
               </div>
-              {view === 'active' ? (
-                <button className="btn-primary" onClick={openCreate}>+ New note</button>
+
+              {activeTag !== null ? (
+                <div className="tag-filter-bar">
+                  Filtered by: <span className="tag-pill">{activeTag.name}</span>
+                  <button className="btn-link" onClick={() => setActiveTag(null)}>Clear</button>
+                </div>
               ) : null}
-            </div>
 
-            {activeTag !== null ? (
-              <div className="tag-filter-bar">
-                Filtered by: <span className="tag-pill">{activeTag.name}</span>
-                <button className="btn-link" onClick={() => setActiveTag(null)}>Clear</button>
+              {/* rerender-dependencies: pass user.id (string) not user (object) */}
+              {view !== 'shared' ? (
+                <NotesList
+                  userId={userId}
+                  view={view}
+                  activeTagId={activeTagId}
+                  onEdit={openEdit}
+                  onTagClick={handleTagClick}
+                  onShare={openShare}
+                  listRef={listRef}
+                />
+              ) : (
+                <SharedNotesList
+                  userId={userId}
+                  onEdit={(note, perm) => openEdit(note, perm)}
+                  sharedListRef={sharedListRef}
+                />
+              )}
+            </>
+          } />
+          <Route path="/documents" element={
+            <>
+              <div className="notes-toolbar">
+                <Link to="/documents/new" className="btn-primary">+ New document</Link>
               </div>
-            ) : null}
 
-            {/* rerender-dependencies: pass user.id (string) not user (object) */}
-            {view !== 'shared' ? (
-              <NotesList
-                userId={userId}
-                view={view}
-                activeTagId={activeTagId}
-                onEdit={openEdit}
-                onTagClick={handleTagClick}
-                onShare={openShare}
-                listRef={listRef}
-              />
-            ) : (
-              <SharedNotesList
-                userId={userId}
-                onEdit={(note, perm) => openEdit(note, perm)}
-                sharedListRef={sharedListRef}
-              />
-            )}
-          </>
-        ) : (
-          <>
-            <div className="notes-toolbar">
-              <button className="btn-primary" onClick={openCreateDoc}>+ New document</button>
-            </div>
-
-            {/* rerender-dependencies: pass user.id (string) not user (object) */}
-            <DocumentsList
-              userId={userId}
-              onEdit={openEditDoc}
-              listRef={docListRef}
-            />
-          </>
-        )}
+              {/* rerender-dependencies: pass user.id (string) not user (object) */}
+              <DocumentsList userId={userId} />
+            </>
+          } />
+          <Route path="/documents/:id" element={
+            <DocumentEditorRoute userId={userId} />
+          } />
+        </Routes>
       </main>
 
       {editorOpen && (
@@ -319,15 +294,6 @@ export default function App() {
           onAttachmentsChange={handleAttachmentsChanged}
           onTagDeleted={tag => { if (activeTag?.id === tag.id) setActiveTag(null) }}
           sharePermission={editSharePermission}
-        />
-      )}
-
-      {docEditorOpen && (
-        <DocumentEditor
-          userId={userId}
-          document={editingDoc}
-          onSave={handleDocSaved}
-          onCancel={closeDocEditor}
         />
       )}
 

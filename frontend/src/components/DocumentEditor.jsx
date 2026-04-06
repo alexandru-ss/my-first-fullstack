@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useDeferredValue, useRef, useState } from 'react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { supabase } from '../lib/supabase'
@@ -80,16 +81,65 @@ function wrapSelection(textarea, before, after) {
 }
 
 /**
+ * Route wrapper that reads the document ID from the URL, fetches the document
+ * (or renders a blank editor for /documents/new), and passes it to DocumentEditor.
+ *
+ * @param {{ userId: string }} props
+ */
+export function DocumentEditorRoute({ userId }) {
+  const { id } = useParams()
+  const navigate = useNavigate()
+  const isNew = id === 'new'
+  const [doc, setDoc] = useState(null)
+  const [loading, setLoading] = useState(!isNew)
+  const [fetchError, setFetchError] = useState(null)
+
+  useEffect(() => {
+    if (isNew) return
+
+    let cancelled = false
+
+    supabase
+      .from('documents')
+      .select('id, title, body, created_at, updated_at')
+      .eq('id', id)
+      .single()
+      .then(({ data, error }) => {
+        if (cancelled) return
+        if (error) {
+          setFetchError(error.message)
+        } else {
+          setDoc(data)
+        }
+        setLoading(false)
+      })
+
+    return () => { cancelled = true }
+  }, [id, isNew])
+
+  if (loading) return <p className="notes-status">Loading document…</p>
+  if (fetchError) return <p className="notes-status notes-error">{fetchError}</p>
+
+  return (
+    <DocumentEditor
+      key={id}
+      userId={userId}
+      document={doc}
+      navigate={navigate}
+    />
+  )
+}
+
+/**
  * Split-pane Markdown editor with live GFM preview and auto-save.
  *
  * @param {{
  *   userId: string,
  *   document: object | null,
- *   onSave: (savedDoc: object) => void,
- *   onCancel: () => void,
+ *   navigate: (path: string, opts?: object) => void,
  * }} props
  */
-export function DocumentEditor({ userId, document: doc, onSave, onCancel }) {
+export function DocumentEditor({ userId, document: doc, navigate }) {
   const [title, setTitle] = useState(doc?.title ?? '')
   const [body, setBody] = useState(doc?.body ?? '')
   // After first auto-save of a new doc, store its id so subsequent saves are updates
@@ -120,7 +170,7 @@ export function DocumentEditor({ userId, document: doc, onSave, onCancel }) {
 
       if (docId) {
         // Update existing
-        const { data, error: updateErr } = await supabase
+        const { error: updateErr } = await supabase
           .from('documents')
           .update({ title: title || 'Untitled', body })
           .eq('id', docId)
@@ -133,7 +183,6 @@ export function DocumentEditor({ userId, document: doc, onSave, onCancel }) {
           return
         }
         setSaveStatus('saved')
-        onSave(data)
       } else {
         // Create new
         const { data, error: insertErr } = await supabase
@@ -148,8 +197,10 @@ export function DocumentEditor({ userId, document: doc, onSave, onCancel }) {
           return
         }
         setDocId(data.id)
+        // Replace /documents/new with the real ID so the URL is shareable
+        // and Back doesn't revisit the blank "new" route.
+        navigate(`/documents/${data.id}`, { replace: true })
         setSaveStatus('saved')
-        onSave(data)
       }
     }, 1500)
 
@@ -178,16 +229,15 @@ export function DocumentEditor({ userId, document: doc, onSave, onCancel }) {
   }
 
   return (
-    <div className="editor-overlay doc-editor-overlay" onMouseDown={onCancel}>
+    <div className="editor-overlay doc-editor-overlay">
       <div
         className="doc-editor-shell"
-        onMouseDown={e => e.stopPropagation()}
       >
-        {/* ── Header row ──────────────────────────────────────────────── */}
+        {/* ── Header row ──────────────────────────────────────────────────── */}
         <div className="doc-editor-header">
-          <button className="btn-secondary" type="button" onClick={onCancel}>
+          <Link className="btn-secondary" to="/documents">
             ← Back
-          </button>
+          </Link>
           <input
             className="field-input doc-title-input"
             type="text"
