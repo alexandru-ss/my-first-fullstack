@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Routes, Route, NavLink, Link } from 'react-router-dom'
+import { Routes, Route, NavLink, Link, Outlet } from 'react-router-dom'
 import { supabase } from './lib/supabase'
 import { useAuth } from './hooks/useAuth'
 import { useTheme } from './hooks/useTheme'
@@ -57,6 +57,15 @@ function Header({ displayName, email, avatarSignedUrl, theme, onToggleTheme, onO
       </div>
     </header>
   )
+}
+
+// rerender-no-inline-components: layout wrappers at module scope
+function CompactLayout() {
+  return <main className="app-main"><Outlet /></main>
+}
+
+function FullLayout() {
+  return <main className="app-main app-main--full"><Outlet /></main>
 }
 
 export default function App() {
@@ -212,8 +221,8 @@ export default function App() {
         onSignOut={handleSignOut}
       />
 
-      <main className="app-main">
-        <Routes>
+      <Routes>
+        <Route element={<CompactLayout />}>
           <Route path="/" element={
             <>
               <div className="notes-toolbar">
@@ -279,11 +288,13 @@ export default function App() {
               <DocumentsList userId={userId} />
             </>
           } />
+        </Route>
+        <Route element={<FullLayout />}>
           <Route path="/documents/:id" element={
             <DocumentEditorRoute userId={userId} />
           } />
-        </Routes>
-      </main>
+        </Route>
+      </Routes>
 
       {editorOpen && (
         <NoteEditor

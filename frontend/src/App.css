@@ -64,6 +64,15 @@
   text-align: left;
 }
 
+.app-main--full {
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .notes-toolbar {
   display: flex;
   align-items: center;
@@ -1060,20 +1069,19 @@
 
 /* ── Document editor (split-pane) ─────────────────────────────────────── */
 
-.doc-editor-overlay {
-  /* Override the default centered modal sizing — the split-pane needs room */
-  align-items: stretch;
-  justify-content: stretch;
-  padding: 0;
-}
-
 .doc-editor-shell {
   display: flex;
   flex-direction: column;
+  flex: 1;
+  min-height: 0;
   width: 100%;
-  height: 100%;
   background: var(--bg);
-  /* No border-radius — full viewport */
+  animation: doc-editor-fadein 150ms ease-out;
+}
+
+@keyframes doc-editor-fadein {
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
 
 .doc-editor-header {
@@ -1087,14 +1095,21 @@
 
 .doc-title-input {
   flex: 1;
-  font-size: 1.05rem;
-  font-weight: 500;
-  border: none;
+  min-width: 0;
+  font: inherit;
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.25px;
+  border: 1px solid transparent;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-h);
-  padding: 6px 8px;
+  padding: 6px 10px;
+  box-sizing: border-box;
+  transition: border-color 0.15s, background 0.15s;
 
-  &:focus { outline: none; border: none; box-shadow: none; }
+  &:hover { background: var(--accent-bg); }
+  &:focus { outline: none; border-color: var(--accent); background: var(--accent-bg); }
   &::placeholder { color: var(--text); opacity: 0.5; }
 }
 
@@ -1124,16 +1139,21 @@
   display: flex;
   flex: 1;
   min-height: 0; /* allow flex children to shrink below content height */
+  overflow: hidden; /* contain child panes */
 }
 
 .doc-editor-pane {
+  flex: 1 1 0%;  /* equal 50/50 split — both start from 0 basis, grow equally */
+  display: flex;
+  flex-direction: column;
   overflow-y: auto;
-  min-width: 120px;
+  min-width: 0; /* prevent content from forcing pane wider than 50% */
 }
 
 .doc-editor-textarea {
+  flex: 1;
   width: 100%;
-  height: 100%;
+  min-height: 0;
   resize: none;
   border: none;
   outline: none;
@@ -1302,4 +1322,41 @@
 .doc-preview img {
   max-width: 100%;
   border-radius: 6px;
+}
+
+/* ── Document editor — narrow viewport ───────────────────────────────────── */
+
+@media (max-width: 768px) {
+  .doc-editor-split {
+    flex-direction: column;
+  }
+
+  .doc-editor-pane {
+    min-width: 0;
+    min-height: 30svh;
+    flex: 1 1 0% !important; /* equal split; override JS inline styles from drag */
+  }
+
+  .doc-editor-divider {
+    width: 100%;
+    height: 6px;
+    cursor: row-resize;
+  }
+
+  .doc-editor-header {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 12px;
+  }
+
+  .doc-title-input {
+    order: 3;
+    flex: 1 0 100%;
+    font-size: 1rem;
+    padding: 6px 10px;
+  }
+
+  .doc-save-status {
+    margin-left: auto;
+  }
 }
