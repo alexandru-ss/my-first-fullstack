@@ -1015,3 +1015,59 @@
   padding: 2px 8px;
   font-size: 0.8rem;
 }
+
+/* ── Section toggle (Notes / Documents) ──────────────────────────────────── */
+
+.section-toggle {
+  display: flex;
+  gap: 2px;
+}
+
+.section-btn {
+  font: inherit;
+  font-size: 1.1rem;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  opacity: 0.55;
+  cursor: pointer;
+  transition: opacity 0.15s, color 0.15s;
+  letter-spacing: -0.5px;
+
+  &:hover:not(.section-btn--active) { opacity: 0.8; }
+  &:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+}
+
+.section-btn--active {
+  opacity: 1;
+  color: var(--text-h);
+}
+
+/* ── Document item card click target ─────────────────────────────────────── */
+
+.doc-item .note-item-body {
+  cursor: pointer;
+
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+    border-radius: 4px;
+  }
+}
+
+/* ── Document editor ─────────────────────────────────────────────────────── */
+
+.doc-editor-form {
+  max-width: 640px;
+}
+
+.doc-body-textarea {
+  min-height: 320px;
+  resize: vertical;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
