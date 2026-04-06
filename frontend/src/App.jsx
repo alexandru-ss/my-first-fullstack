@@ -211,7 +211,7 @@ export default function App() {
 
   function handleDocSaved(savedDoc) {
     docListRef.current?.upsert(savedDoc)
-    closeDocEditor()
+    // Editor stays open — auto-save keeps it alive until user clicks "Back"
   }
 
   function handleAttachmentsChanged(newAttachments) {
