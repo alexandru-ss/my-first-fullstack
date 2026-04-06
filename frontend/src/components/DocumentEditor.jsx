@@ -280,7 +280,7 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
         navigate(`/documents/${data.id}`, { replace: true })
         setSaveStatus('saved')
       }
-    }, 0)
+    }, 1500)
 
     return () => {
       cancelled = true
@@ -327,8 +327,8 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
         ({ new: newRow }) => {
           // View-only: always apply (user cannot edit, no conflict possible)
           if (isViewOnly) {
-            if (newRow.title != null) { savedTitle.current = newRow.title; setTitle(newRow.title) }
-            if (newRow.body  != null) { savedBody.current  = newRow.body;  setBody(newRow.body)   }
+            if (newRow.title != null) { savedTitle.current = newRow.title; titleRef.current = newRow.title; setTitle(newRow.title) }
+            if (newRow.body  != null) { savedBody.current  = newRow.body;  bodyRef.current  = newRow.body;  setBody(newRow.body)   }
             return
           }
 
@@ -338,10 +338,12 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
           const bodyDirty  = bodyRef.current  !== savedBody.current
           if (!titleDirty && newRow.title != null && newRow.title !== savedTitle.current) {
             savedTitle.current = newRow.title
+            titleRef.current   = newRow.title
             setTitle(newRow.title)
           }
           if (!bodyDirty && newRow.body != null && newRow.body !== savedBody.current) {
             savedBody.current = newRow.body
+            bodyRef.current   = newRow.body
             setBody(newRow.body)
           }
         }
