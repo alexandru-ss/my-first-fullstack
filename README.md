@@ -14,6 +14,15 @@ A private notes app: users sign up, sign in, and manage their own notes. Data is
 | Private notes per user | RLS policies — each user can only read/write their own rows |
 | Create, edit, delete notes | Full CRUD via `@supabase/supabase-js` client |
 | Typed database access | Auto-generated `database.types.ts` wired into the Supabase client |
+| Pin notes | `notes.pinned` boolean; partial index keeps pinned queries fast |
+| Archive notes | `notes.archived_at` timestamptz; NULL = active, non-NULL = archived; separate partial indexes for each hot path |
+| Tag notes | `tags` + `note_tags` junction tables with full RLS; each user owns their own tag vocabulary |
+| Full-text search | `notes.search_vector` GENERATED ALWAYS tsvector (title A · content B); GIN index; search scoped by RLS |
+| File attachments | Private `attachments` storage bucket; `note_attachments` metadata table; signed-URL previews; 10 MB / allowed-type validation |
+| User profiles & avatars | `users.avatar_path` + private `avatars` bucket; display-name editing; initials fallback |
+| Share notes | `note_shares` table with `view` / `edit` permission enum; email-based invite via `find_user_by_email()` RPC; owners can revoke |
+| Real-time sync | Supabase Realtime on `notes`, `note_attachments`, and `note_shares`; REPLICA IDENTITY FULL on all three |
+| Dark / light theme | `useTheme` hook; OS-preference detection; localStorage persistence; CSS custom-property theming |
 
 ---
 
@@ -36,18 +45,39 @@ my-first-fullstack/
 │   ├── src/
 │   │   ├── database.types.ts   # Auto-generated — do not edit by hand
 │   │   ├── lib/supabase.js     # Supabase client singleton
-│   │   ├── hooks/useAuth.js    # Auth state hook
+│   │   ├── hooks/
+│   │   │   ├── useAuth.js      # Auth state hook (session, user, loading)
+│   │   │   └── useTheme.js     # Dark/light theme with localStorage persistence
 │   │   ├── components/
-│   │   │   ├── AuthForm.jsx    # Sign-in / sign-up form
-│   │   │   ├── NotesList.jsx   # Notes list with delete
-│   │   │   └── NoteEditor.jsx  # Create / edit modal
+│   │   │   ├── AuthForm.jsx        # Sign-in / sign-up form
+│   │   │   ├── NotesList.jsx       # Notes list — active/archived tabs, search, tags, realtime
+│   │   │   ├── NoteEditor.jsx      # Create / edit modal with file attachments
+│   │   │   ├── FilePreview.jsx     # Full-screen image preview overlay
+│   │   │   ├── ProfileEditor.jsx   # Display name + avatar upload modal
+│   │   │   ├── SharePanel.jsx      # Share-note modal (invite, permissions, revoke)
+│   │   │   └── SharedNotesList.jsx # Notes shared with the current user
 │   │   ├── App.jsx             # App shell
 │   │   └── index.css           # Global CSS variables + base styles
 │   └── package.json
 └── supabase/
     ├── config.toml             # Local Supabase project config
     ├── migrations/
-    │   └── 20260401000000_create_users_notes.sql   # Schema + RLS policies
+    │   ├── 20260401000000_create_users_notes.sql       # Base schema: users, notes, RLS
+    │   ├── 20260401000001_notes_add_pinned.sql         # notes.pinned + partial index
+    │   ├── 20260401000002_notes_add_archived_at.sql    # notes.archived_at + partial indexes
+    │   ├── 20260401000003_notes_add_tags.sql           # tags + note_tags tables, RLS
+    │   ├── 20260401000004_backfill_users.sql           # Idempotent handle_new_user trigger
+    │   ├── 20260401000005_notes_add_search_vector.sql  # Full-text search tsvector + GIN index
+    │   ├── 20260401000006_notes_realtime.sql           # Realtime publication for notes
+    │   ├── 20260401000007_users_add_avatar.sql         # users.avatar_path + avatars bucket
+    │   ├── 20260401000008_notes_add_attachments.sql    # note_attachments table + attachments bucket
+    │   ├── 20260401000009_note_attachments_realtime.sql # Realtime for note_attachments
+    │   ├── 20260401000010_notes_add_shares.sql         # note_shares, note_permission enum, helper RPCs
+    │   ├── 20260401000011_fix_notes_update_policy.sql  # Fix RLS recursion in UPDATE policy
+    │   ├── 20260401000012_note_shares_realtime.sql     # Realtime for note_shares
+    │   ├── 20260401000013_fix_shared_attachment_realtime.sql  # Fix Realtime DELETE for shared attachments
+    │   ├── 20260401000014_fix_note_attachments_shared_policy.sql # Fix ambiguous column in shared policy
+    │   └── 20260401000015_note_attachments_composite_pk.sql  # Composite PK (note_id, id) for Realtime
     └── seed.sql                # Sample users and notes for local dev
 ```
 
@@ -169,12 +199,41 @@ npm run preview   # serve the production build locally
 ## Database schema
 
 ```
-auth.users          (managed by Supabase Auth)
-    └── public.users        id (fk), email, username, created_at, updated_at
-            └── public.notes    id, user_id (fk), title, content, created_at, updated_at
+auth.users                      (managed by Supabase Auth)
+└── public.users                id (fk), email, username, avatar_path, created_at, updated_at
+        └── public.notes        id, user_id (fk), title, content,
+                                pinned, archived_at, search_vector,
+                                created_at, updated_at
+                ├── public.note_tags        note_id (fk), tag_id (fk)
+                ├── public.note_attachments (note_id, id) PK, user_id (fk),
+                │                           storage_path, file_name, mime_type,
+                │                           size_bytes, created_at
+                └── public.note_shares      id, note_id (fk), owner_id (fk),
+                                            shared_with_email, shared_with_id (fk),
+                                            permission (view|edit), created_at
+public.tags                     id, user_id (fk), name  [UNIQUE(user_id, name)]
 ```
 
-RLS policies on `public.notes` enforce that every SELECT, INSERT, UPDATE, and DELETE is restricted to rows where `user_id = auth.uid()`. The `auth.uid()` call is wrapped in a sub-SELECT so it is evaluated once per statement, not once per row.
+**Storage buckets (both private):**
+
+| Bucket | Path structure | Purpose |
+|---|---|---|
+| `avatars` | `<user_id>/avatar.png` | User profile pictures |
+| `attachments` | `<user_id>/<note_id>/<filename>` | Note file attachments |
+
+**Key helper functions (SECURITY DEFINER):**
+
+| Function | Purpose |
+|---|---|
+| `has_note_share_access(note_id)` | True if caller has any share (view or edit) on the note |
+| `has_note_edit_permission(note_id)` | True if caller has an edit-permission share |
+| `has_share_from_user(owner_id)` | True if caller has any share from that owner (used by avatar storage policy) |
+| `find_user_by_email(email)` | Resolves email → (id, username) for share creation |
+| `get_note_owner(note_id)` | Returns note owner uuid; bypasses RLS to prevent recursive policy evaluation |
+
+**Realtime** is enabled (REPLICA IDENTITY FULL) on `notes`, `note_attachments`, and `note_shares`.
+
+RLS policies on all tables enforce that users can only access their own rows — or rows explicitly shared with them via `note_shares`. The `auth.uid()` call is wrapped in a sub-SELECT so it is evaluated once per statement, not once per row.
 
 ---
 

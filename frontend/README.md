@@ -32,12 +32,17 @@ frontend/
     ├── lib/
     │   └── supabase.js         # Module-level Supabase client singleton
     ├── hooks/
-    │   └── useAuth.js          # Auth state hook (session, user, loading)
+    │   ├── useAuth.js          # Auth state hook (session, user, loading)
+    │   └── useTheme.js         # Dark/light theme with OS-detection + localStorage
     ├── components/
     │   ├── AuthForm.jsx        # Sign-in / sign-up form
-    │   ├── NotesList.jsx       # Fetches + renders the notes list
-    │   └── NoteEditor.jsx      # Create / edit note modal
-    ├── App.jsx                 # App shell — routes between auth and notes UI
+    │   ├── NotesList.jsx       # Active/archived tabs, full-text search, tag filter, realtime
+    │   ├── NoteEditor.jsx      # Create/edit modal with file attachment upload/preview/delete
+    │   ├── FilePreview.jsx     # Full-screen image preview overlay (Escape / backdrop to close)
+    │   ├── ProfileEditor.jsx   # Display name + avatar upload modal
+    │   ├── SharePanel.jsx      # Share-note modal — invite by email, set permission, revoke
+    │   └── SharedNotesList.jsx # Notes shared with the current user, with owner attribution
+    ├── App.jsx                 # App shell — routes between auth/notes/shared UI
     ├── App.css                 # App-specific styles (reuses index.css tokens)
     └── index.css               # Global CSS variables + base styles
 ```
@@ -76,9 +81,31 @@ After `NoteEditor` saves a note, the server response already contains the persis
 
 Anywhere state is updated based on its previous value (`notes.filter(...)`, `[note, ...curr]`), the functional form of `setState(curr => ...)` is used. This eliminates stale-closure bugs and means the callbacks never need `notes` in their dependency array, keeping them stable across renders.
 
+### Theme — `useTheme.js`
+
+`useTheme` reads `localStorage` first, then falls back to `window.matchMedia('(prefers-color-scheme: dark)')` as a lazy initializer (passed by reference, not called eagerly). `toggleTheme` uses functional `setState` with an empty dependency array so the callback reference is stable across renders. The chosen theme is written to `document.documentElement.dataset.theme`, picked up by CSS custom-property overrides in `index.css`.
+
+### Realtime sync
+
+All three mutable tables (`notes`, `note_attachments`, `note_shares`) have `REPLICA IDENTITY FULL` and are added to the `supabase_realtime` publication. Components subscribe using `supabase.channel()` and update local state imperatively on INSERT / UPDATE / DELETE events — no full re-fetch needed.
+
+`note_attachments` uses a composite primary key `(note_id, id)` so DELETE events always include `note_id`, allowing both owner and shared-user subscribers to locate the correct parent note.
+
+### File attachments
+
+`NoteEditor` validates MIME type and file size (10 MB max) on the client before uploading to the private `attachments` bucket under `<userId>/<noteId>/<filename>`. Metadata is stored in `note_attachments`; display uses short-lived signed URLs generated on demand. `FilePreview` renders images inline in a full-screen overlay; PDFs open in a new tab.
+
+### Note sharing
+
+`SharePanel` resolves the invitee's email via the `find_user_by_email()` SECURITY DEFINER RPC (which returns only non-sensitive columns), then inserts a `note_shares` row with the requested `view` or `edit` permission. Shared notes appear in `SharedNotesList` with owner attribution (avatar + username). Editors open `NoteEditor` with the permission level threaded in so the UI can correctly gate destructive actions.
+
+### User avatars
+
+`ProfileEditor` uploads the file to `avatars/<userId>/avatar.png` (upsert), stores only the storage path in `users.avatar_path`, and generates a signed URL separately for display. This prevents signed-URL expiry from invalidating cached DB data and keeps the URL out of the database.
+
 ### Styles
 
-`App.css` is written entirely in terms of the CSS custom properties defined in `index.css` (`--bg`, `--text`, `--accent`, `--border`, `--shadow`, etc.). Dark mode is handled automatically by `index.css`'s `@media (prefers-color-scheme: dark)` block — no extra dark-mode logic needed in components.
+`App.css` is written entirely in terms of the CSS custom properties defined in `index.css` (`--bg`, `--text`, `--accent`, `--border`, `--shadow`, etc.). Manual dark mode is applied via `document.documentElement.dataset.theme = 'dark'|'light'`, which overrides the `@media (prefers-color-scheme: dark)` defaults in `index.css` — so the toggle works even when the OS preference doesn't match the user's explicit choice.
 
 ---
 
@@ -102,5 +129,8 @@ supabase db reset   # re-runs all migrations + seed
 supabase db seed    # seed only (on an already-migrated DB)
 ```
 
-RLS ensures each user can only read, create, edit, and delete **their own** notes. The policy uses `(select auth.uid()) = user_id`, wrapping `auth.uid()` in a sub-SELECT so it is evaluated once per statement rather than once per row — a critical performance pattern for large tables.
+Tables: `users`, `notes`, `tags`, `note_tags`, `note_attachments`, `note_shares`.  
+Storage buckets: `avatars` (profile pictures), `attachments` (note files) — both private.
+
+RLS ensures each user can only read, create, edit, and delete **their own** rows — or rows explicitly shared with them via `note_shares`. The policy uses `(select auth.uid()) = user_id`, wrapping `auth.uid()` in a sub-SELECT so it is evaluated once per statement rather than once per row — a critical performance pattern for large tables.
 
