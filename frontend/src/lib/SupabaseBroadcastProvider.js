@@ -68,6 +68,12 @@ export class SupabaseBroadcastProvider {
       } catch { /* ignore malformed payloads */ }
     })
 
+    // ── Title sync: instant broadcast (avoids DB round-trip) ──────────────
+    this.channel.on('broadcast', { event: 'title-update' }, ({ payload }) => {
+      if (this.destroyed) return
+      this._emit('title-update', payload.title)
+    })
+
     // ── Local → remote: broadcast own updates ────────────────────────────
     this._updateHandler = (update, origin) => {
       if (this.destroyed || origin === 'remote') return
@@ -102,7 +108,7 @@ export class SupabaseBroadcastProvider {
 
   // ── Simple event emitter ───────────────────────────────────────────────
 
-  /** @param {'synced' | 'no-peers'} event */
+  /** @param {'synced' | 'no-peers' | 'title-update'} event */
   on(event, fn) {
     (this._listeners[event] ??= new Set()).add(fn)
     return this
@@ -113,8 +119,18 @@ export class SupabaseBroadcastProvider {
     return this
   }
 
-  _emit(event) {
-    this._listeners[event]?.forEach((fn) => fn())
+  _emit(event, ...args) {
+    this._listeners[event]?.forEach((fn) => fn(...args))
+  }
+
+  /** Broadcast a title change to all connected peers. */
+  sendTitle(title) {
+    if (this.destroyed) return
+    this.channel.send({
+      type: 'broadcast',
+      event: 'title-update',
+      payload: { title },
+    })
   }
 
   // ── Teardown ───────────────────────────────────────────────────────────

@@ -267,6 +267,7 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
   const ydocRef = useRef(null)
   const ytextRef = useRef(null)
   const providerRef = useRef(null)
+  const ydocReadyRef = useRef(false)
 
   // ── Auto-save (debounced 1.5 s after typing stops) ──────────────────────
   // Track what's already persisted so we can skip no-op saves.
@@ -291,10 +292,14 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
 
       const currentDocId = docIdRef.current
 
-      // Extract Yjs state + plain text atomically for persistence
+      // Extract Yjs state + plain text atomically for persistence.
+      // When ydocReady is false (legacy doc before no-peers/sync), fall back
+      // to the React body state so a title-only save doesn't overwrite
+      // the existing body with the still-empty Y.Doc content.
       const ydoc = ydocRef.current
-      const bodyText = ydoc ? ydoc.getText('content').toString() : body
-      const yjsPayload = ydoc ? fromUint8Array(Y.encodeStateAsUpdate(ydoc)) : undefined
+      const ydocReady = ydoc && ydocReadyRef.current
+      const bodyText = ydocReady ? ydoc.getText('content').toString() : body
+      const yjsPayload = ydocReady ? fromUint8Array(Y.encodeStateAsUpdate(ydoc)) : undefined
 
       if (currentDocId) {
         // Update existing
@@ -412,6 +417,7 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
     if (doc?.yjs_state) {
       try {
         Y.applyUpdate(ydoc, toUint8Array(doc.yjs_state))
+        ydocReadyRef.current = true
       } catch {
         // Corrupted state — leave empty; will be seeded via provider or no-peers
       }
@@ -432,6 +438,13 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
       if (transaction.origin === 'textarea-input') return
       const text = ytext.toString()
       if (text === bodyRef.current) return
+
+      // Remote-only update with no pending local body changes: mark as
+      // already-persisted so the auto-save doesn't redundantly fire (which
+      // would race with the owner's save and could revert the title).
+      if (transaction.origin === 'remote' && bodyRef.current === savedBody.current) {
+        savedBody.current = text
+      }
 
       // Best-effort cursor preservation for remote edits
       const ta = textareaRef.current
@@ -458,6 +471,7 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
       ydoc.destroy()
       ydocRef.current = null
       ytextRef.current = null
+      ydocReadyRef.current = false
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -469,6 +483,7 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
 
     provider.on('synced', () => {
       // Peer state received — Y.Doc is now up to date from a remote peer
+      ydocReadyRef.current = true
       const ytext = ytextRef.current
       if (!ytext) return
       const text = ytext.toString()
@@ -490,6 +505,18 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
         bodyRef.current = text
         setBody(text)
       }
+      ydocReadyRef.current = true
+    })
+
+    provider.on('title-update', (remoteTitle) => {
+      // Instant title sync from a peer — skip if the local user is actively
+      // editing the title (dirty check).
+      const titleDirty = titleRef.current !== savedTitle.current
+      if (!titleDirty && remoteTitle != null && remoteTitle !== titleRef.current) {
+        savedTitle.current = remoteTitle
+        titleRef.current   = remoteTitle
+        setTitle(remoteTitle)
+      }
     })
 
     return () => {
@@ -505,16 +532,19 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
       const currentDocId = docIdRef.current
       if (!currentDocId || !ydoc) return
       const currentTitle = titleRef.current
-      const currentBody = ydoc.getText('content').toString()
+      const ydocReady = ydocReadyRef.current
+      const currentBody = ydocReady ? ydoc.getText('content').toString() : bodyRef.current
       if (currentTitle === savedTitle.current && currentBody === savedBody.current) return
-      const yjsPayload = fromUint8Array(Y.encodeStateAsUpdate(ydoc))
+      const updatePayload = {
+        title: currentTitle || 'Untitled',
+        body: currentBody,
+      }
+      if (ydocReady) {
+        updatePayload.yjs_state = fromUint8Array(Y.encodeStateAsUpdate(ydoc))
+      }
       await supabase
         .from('documents')
-        .update({
-          title: currentTitle || 'Untitled',
-          body: currentBody,
-          yjs_state: yjsPayload,
-        })
+        .update(updatePayload)
         .eq('id', currentDocId)
       savedTitle.current = currentTitle
       savedBody.current = currentBody
@@ -546,6 +576,8 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
     const ytext = ytextRef.current
     if (!ytext) { setBody(newValue); return }
 
+    // User is typing — Y.Doc now has intentional content
+    ydocReadyRef.current = true
     const oldValue = ytext.toString()
     if (newValue === oldValue) return
 
@@ -557,6 +589,13 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
 
     bodyRef.current = ytext.toString()
     setBody(bodyRef.current)
+  }
+
+  // ── Title input → broadcast instantly ────────────────────────────────────
+  function handleTitleChange(e) {
+    const newTitle = e.target.value
+    setTitle(newTitle)
+    providerRef.current?.sendTitle(newTitle)
   }
 
   // ── Keyboard shortcuts ────────────────────────────────────────────────────
@@ -586,7 +625,7 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
             type="text"
             placeholder="Document title"
             value={title}
-            onChange={e => setTitle(e.target.value)}
+            onChange={handleTitleChange}
             autoFocus
           />
         ) : (
