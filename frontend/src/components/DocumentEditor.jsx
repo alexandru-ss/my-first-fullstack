@@ -2,7 +2,10 @@ import { memo, useCallback, useEffect, useDeferredValue, useRef, useState } from
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import * as Y from 'yjs'
+import { fromUint8Array, toUint8Array } from 'js-base64'
 import { supabase } from '../lib/supabase'
+import { SupabaseBroadcastProvider } from '../lib/SupabaseBroadcastProvider'
 
 // ── Memoized preview ────────────────────────────────────────────────────────
 // rerender-no-inline-components + rerender-memo: module-scope memoized component
@@ -99,6 +102,50 @@ function wrapSelection(textarea, before, after) {
   })
 }
 
+// ── Text diff helper ────────────────────────────────────────────────────────
+// Computes a minimal { index, deleteCount, insertText } diff between two
+// strings using common-prefix / common-suffix comparison.  Sufficient for
+// single-textarea editing (handles typing, paste, cut, and bulk replace).
+function computeTextDiff(oldStr, newStr) {
+  let start = 0
+  while (start < oldStr.length && start < newStr.length && oldStr[start] === newStr[start]) {
+    start++
+  }
+  let oldEnd = oldStr.length
+  let newEnd = newStr.length
+  while (oldEnd > start && newEnd > start && oldStr[oldEnd - 1] === newStr[newEnd - 1]) {
+    oldEnd--
+    newEnd--
+  }
+  return {
+    index: start,
+    deleteCount: oldEnd - start,
+    insertText: newStr.slice(start, newEnd),
+  }
+}
+
+// ── Cursor mapping helper ───────────────────────────────────────────────────
+// Maps a cursor position from the old text to the new text using a Y.Text
+// event delta (array of { retain, insert, delete } operations).
+function mapCursorPosition(delta, pos) {
+  let consumed = 0 // characters consumed from old text
+  let produced = 0 // characters produced in new text
+  for (const op of delta) {
+    if (op.retain != null) {
+      if (consumed + op.retain >= pos) return produced + (pos - consumed)
+      consumed += op.retain
+      produced += op.retain
+    } else if (op.insert != null) {
+      const len = typeof op.insert === 'string' ? op.insert.length : 1
+      produced += len
+    } else if (op.delete != null) {
+      if (consumed + op.delete >= pos) return produced
+      consumed += op.delete
+    }
+  }
+  return produced + (pos - consumed)
+}
+
 /**
  * Route wrapper that reads the document ID from the URL, fetches the document
  * (or renders a blank editor for /documents/new), and passes it to DocumentEditor.
@@ -136,7 +183,7 @@ export function DocumentEditorRoute({ userId, onOpenShare }) {
     Promise.all([
       supabase
         .from('documents')
-        .select('id, user_id, title, body, created_at, updated_at')
+        .select('id, user_id, title, body, yjs_state, created_at, updated_at')
         .eq('id', id)
         .single(),
       supabase
@@ -216,6 +263,11 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
 
   const { containerRef, onMouseDown } = useSplitPane()
 
+  // ── Yjs CRDT state ─────────────────────────────────────────────────────
+  const ydocRef = useRef(null)
+  const ytextRef = useRef(null)
+  const providerRef = useRef(null)
+
   // ── Auto-save (debounced 1.5 s after typing stops) ──────────────────────
   // Track what's already persisted so we can skip no-op saves.
   // StrictMode-safe: on mount the values equal the DB values → skip.
@@ -239,11 +291,20 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
 
       const currentDocId = docIdRef.current
 
+      // Extract Yjs state + plain text atomically for persistence
+      const ydoc = ydocRef.current
+      const bodyText = ydoc ? ydoc.getText('content').toString() : body
+      const yjsPayload = ydoc ? fromUint8Array(Y.encodeStateAsUpdate(ydoc)) : undefined
+
       if (currentDocId) {
         // Update existing
         const { error: updateErr } = await supabase
           .from('documents')
-          .update({ title: title || 'Untitled', body })
+          .update({
+            title: title || 'Untitled',
+            body: bodyText,
+            ...(yjsPayload != null && { yjs_state: yjsPayload }),
+          })
           .eq('id', currentDocId)
           .select()
           .single()
@@ -255,13 +316,18 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
           return
         }
         savedTitle.current = title
-        savedBody.current = body
+        savedBody.current = bodyText
         setSaveStatus('saved')
       } else {
         // Create new
         const { data, error: insertErr } = await supabase
           .from('documents')
-          .insert({ user_id: userId, title: title || 'Untitled', body })
+          .insert({
+            user_id: userId,
+            title: title || 'Untitled',
+            body: bodyText,
+            ...(yjsPayload != null && { yjs_state: yjsPayload }),
+          })
           .select()
           .single()
 
@@ -274,7 +340,7 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
         docIdRef.current = data.id
         setDocId(data.id)
         savedTitle.current = title
-        savedBody.current = body
+        savedBody.current = bodyText
         // Replace /documents/new with the real ID so the URL is shareable
         // and Back doesn't revisit the blank "new" route.
         navigate(`/documents/${data.id}`, { replace: true })
@@ -295,20 +361,6 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
     return () => clearTimeout(timer)
   }, [saveStatus])
 
-  // ── Realtime: live updates for ALL users viewing this document ──────
-  // Subscribe to document UPDATE events so every open editor/viewer sees
-  // changes saved by another user in real time.
-  //
-  // Conflict strategy (simple "last save wins"):
-  //   - View-only users always accept incoming updates (they can't edit).
-  //   - Editable users (owner or shared-edit) accept incoming updates ONLY
-  //     when they have no pending unsaved changes (local state === saved
-  //     state). This avoids clobbering mid-typing edits while still
-  //     reflecting the other user's saves when the local user is idle.
-  //   - Self-echo is naturally filtered: after a successful save,
-  //     savedTitle/savedBody already match the incoming Realtime payload,
-  //     so `newRow.title !== savedTitle.current` is false → no-op.
-
   // Refs to track current local values without adding them to the effect
   // dependency array (which would tear down the channel on every keystroke).
   const titleRef = useRef(title)
@@ -316,6 +368,8 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
   titleRef.current = title
   bodyRef.current  = body
 
+  // ── Realtime: title sync via postgres_changes ───────────────────────────
+  // Body is now synced via Yjs Broadcast — only title uses DB-level Realtime.
   useEffect(() => {
     if (!docId) return
 
@@ -325,26 +379,15 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'documents', filter: `id=eq.${docId}` },
         ({ new: newRow }) => {
-          // View-only: always apply (user cannot edit, no conflict possible)
           if (isViewOnly) {
             if (newRow.title != null) { savedTitle.current = newRow.title; titleRef.current = newRow.title; setTitle(newRow.title) }
-            if (newRow.body  != null) { savedBody.current  = newRow.body;  bodyRef.current  = newRow.body;  setBody(newRow.body)   }
             return
           }
-
-          // Editable user: only apply if there are no unsaved local changes.
-          // This avoids overwriting text the user is currently typing.
           const titleDirty = titleRef.current !== savedTitle.current
-          const bodyDirty  = bodyRef.current  !== savedBody.current
           if (!titleDirty && newRow.title != null && newRow.title !== savedTitle.current) {
             savedTitle.current = newRow.title
             titleRef.current   = newRow.title
             setTitle(newRow.title)
-          }
-          if (!bodyDirty && newRow.body != null && newRow.body !== savedBody.current) {
-            savedBody.current = newRow.body
-            bodyRef.current   = newRow.body
-            setBody(newRow.body)
           }
         }
       )
@@ -352,6 +395,169 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
 
     return () => { supabase.removeChannel(channel) }
   }, [docId, isViewOnly])
+
+  // ── Yjs CRDT: initialise document and observe changes ───────────────────
+  useEffect(() => {
+    const ydoc = new Y.Doc()
+    const ytext = ydoc.getText('content')
+    ydocRef.current = ydoc
+    ytextRef.current = ytext
+
+    // Initialise from persisted Yjs state (both clients load the same CRDT
+    // structure → incremental updates merge correctly).
+    // When yjs_state is NULL (legacy doc), we do NOT seed here — seeding
+    // happens later via the provider's sync protocol so that only one client
+    // creates the CRDT history and the other receives it as a full state
+    // merge, avoiding incompatible duplicate insertions.
+    if (doc?.yjs_state) {
+      try {
+        Y.applyUpdate(ydoc, toUint8Array(doc.yjs_state))
+      } catch {
+        // Corrupted state — leave empty; will be seeded via provider or no-peers
+      }
+    }
+
+    // Sync React state with the Yjs content
+    const initialText = ytext.toString()
+    if (initialText && initialText !== bodyRef.current) {
+      savedBody.current = initialText
+      bodyRef.current = initialText
+      setBody(initialText)
+    }
+
+    // Observe Y.Text changes (remote peer edits or local programmatic edits)
+    const observer = (event, transaction) => {
+      // Skip updates that originated from the local textarea handler —
+      // handleBodyChange already called setBody for those.
+      if (transaction.origin === 'textarea-input') return
+      const text = ytext.toString()
+      if (text === bodyRef.current) return
+
+      // Best-effort cursor preservation for remote edits
+      const ta = textareaRef.current
+      let adjStart, adjEnd
+      if (ta && transaction.origin === 'remote') {
+        adjStart = mapCursorPosition(event.delta, ta.selectionStart)
+        adjEnd   = mapCursorPosition(event.delta, ta.selectionEnd)
+      }
+
+      bodyRef.current = text
+      setBody(text)
+
+      if (adjStart != null && ta) {
+        requestAnimationFrame(() => {
+          ta.selectionStart = adjStart
+          ta.selectionEnd   = adjEnd
+        })
+      }
+    }
+    ytext.observe(observer)
+
+    return () => {
+      ytext.unobserve(observer)
+      ydoc.destroy()
+      ydocRef.current = null
+      ytextRef.current = null
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Broadcast provider (requires a persisted docId) ─────────────────────
+  useEffect(() => {
+    if (!docId || !ydocRef.current) return
+    const provider = new SupabaseBroadcastProvider(supabase, docId, ydocRef.current)
+    providerRef.current = provider
+
+    provider.on('synced', () => {
+      // Peer state received — Y.Doc is now up to date from a remote peer
+      const ytext = ytextRef.current
+      if (!ytext) return
+      const text = ytext.toString()
+      if (text !== bodyRef.current) {
+        savedBody.current = text
+        bodyRef.current = text
+        setBody(text)
+      }
+    })
+
+    provider.on('no-peers', () => {
+      // No other clients online — if Y.Doc is still empty (legacy doc with
+      // no yjs_state), seed it from the plain-text body now.
+      const ytext = ytextRef.current
+      if (!ytext) return
+      if (ytext.toString() === '' && doc?.body) {
+        ytext.insert(0, doc.body)
+        const text = ytext.toString()
+        bodyRef.current = text
+        setBody(text)
+      }
+    })
+
+    return () => {
+      provider.destroy()
+      providerRef.current = null
+    }
+  }, [docId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Page unload safety net ──────────────────────────────────────────────
+  useEffect(() => {
+    const flushSave = async () => {
+      const ydoc = ydocRef.current
+      const currentDocId = docIdRef.current
+      if (!currentDocId || !ydoc) return
+      const currentTitle = titleRef.current
+      const currentBody = ydoc.getText('content').toString()
+      if (currentTitle === savedTitle.current && currentBody === savedBody.current) return
+      const yjsPayload = fromUint8Array(Y.encodeStateAsUpdate(ydoc))
+      await supabase
+        .from('documents')
+        .update({
+          title: currentTitle || 'Untitled',
+          body: currentBody,
+          yjs_state: yjsPayload,
+        })
+        .eq('id', currentDocId)
+      savedTitle.current = currentTitle
+      savedBody.current = currentBody
+    }
+
+    const handleVisChange = () => {
+      if (document.visibilityState === 'hidden') flushSave()
+    }
+    const handleBeforeUnload = (e) => {
+      const dirty =
+        titleRef.current !== savedTitle.current ||
+        bodyRef.current !== savedBody.current
+      if (dirty) { e.preventDefault(); e.returnValue = '' }
+    }
+
+    if (!isViewOnly) {
+      document.addEventListener('visibilitychange', handleVisChange)
+      window.addEventListener('beforeunload', handleBeforeUnload)
+    }
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisChange)
+      window.removeEventListener('beforeunload', handleBeforeUnload)
+    }
+  }, [isViewOnly]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Textarea input → Yjs (diff-based) ──────────────────────────────────
+  function handleBodyChange(e) {
+    const newValue = e.target.value
+    const ytext = ytextRef.current
+    if (!ytext) { setBody(newValue); return }
+
+    const oldValue = ytext.toString()
+    if (newValue === oldValue) return
+
+    const { index, deleteCount, insertText } = computeTextDiff(oldValue, newValue)
+    ydocRef.current.transact(() => {
+      if (deleteCount > 0) ytext.delete(index, deleteCount)
+      if (insertText) ytext.insert(index, insertText)
+    }, 'textarea-input')
+
+    bodyRef.current = ytext.toString()
+    setBody(bodyRef.current)
+  }
 
   // ── Keyboard shortcuts ────────────────────────────────────────────────────
   function handleKeyDown(e) {
@@ -422,7 +628,7 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
               className="doc-editor-textarea"
               placeholder="Write Markdown here…"
               value={body}
-              onChange={e => setBody(e.target.value)}
+              onChange={handleBodyChange}
               onKeyDown={handleKeyDown}
               spellCheck={false}
             />
