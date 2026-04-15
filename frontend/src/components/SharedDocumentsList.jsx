@@ -127,7 +127,7 @@ export function SharedDocumentsList({ userId }) {
     if (!userId) return
 
     const channel = supabase
-      .channel(`shared-docs-${userId}`)
+      .channel(`shared-docs-${userId}-${Math.random().toString(36).slice(2, 8)}`)
       .on(
         'postgres_changes',
         {
@@ -158,7 +158,9 @@ export function SharedDocumentsList({ userId }) {
       )
       .subscribe()
 
-    return () => { supabase.removeChannel(channel) }
+    return () => {
+      supabase.removeChannel(channel)
+    }
   }, [userId])
 
   // Stable dep key for document IDs — used for content UPDATE subscription
@@ -173,7 +175,7 @@ export function SharedDocumentsList({ userId }) {
     if (!userId || !docIdKey) return
 
     const channel = supabase
-      .channel(`shared-docs-content-${userId}`)
+      .channel(`shared-docs-content-${userId}-${Math.random().toString(36).slice(2, 8)}`)
       .on(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'documents', filter: `id=in.(${docIdKey})` },
@@ -197,7 +199,9 @@ export function SharedDocumentsList({ userId }) {
       )
       .subscribe()
 
-    return () => { supabase.removeChannel(channel) }
+    return () => {
+      supabase.removeChannel(channel)
+    }
   }, [userId, docIdKey])
 
   if (loading) return <p className="notes-status">Loading shared documents…</p>

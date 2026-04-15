@@ -78,7 +78,7 @@ export function DocumentSharePanel({ documentId, documentTitle, userEmail, onClo
   // Realtime: keep share list in sync across tabs / devices
   useEffect(() => {
     const channel = supabase
-      .channel(`doc-share-panel-${documentId}`)
+      .channel(`doc-share-panel-${documentId}-${Math.random().toString(36).slice(2, 8)}`)
       .on(
         'postgres_changes',
         {
@@ -111,7 +111,9 @@ export function DocumentSharePanel({ documentId, documentTitle, userEmail, onClo
       )
       .subscribe()
 
-    return () => { supabase.removeChannel(channel) }
+    return () => {
+      supabase.removeChannel(channel)
+    }
   }, [documentId])
 
   // Close on Escape

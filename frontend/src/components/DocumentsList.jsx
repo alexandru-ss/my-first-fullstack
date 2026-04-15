@@ -73,7 +73,7 @@ export function DocumentsList({ userId }) {
     if (!userId) return
 
     const channel = supabase
-      .channel(`documents-realtime-${userId}`)
+      .channel(`documents-realtime-${userId}-${Math.random().toString(36).slice(2, 8)}`)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'documents', filter: `user_id=eq.${userId}` },
@@ -100,7 +100,9 @@ export function DocumentsList({ userId }) {
       )
       .subscribe()
 
-    return () => { supabase.removeChannel(channel) }
+    return () => {
+      supabase.removeChannel(channel)
+    }
   }, [userId])
 
   async function handleDelete(docId) {

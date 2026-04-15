@@ -373,33 +373,97 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
   titleRef.current = title
   bodyRef.current  = body
 
-  // ── Realtime: title sync via postgres_changes ───────────────────────────
-  // Body is now synced via Yjs Broadcast — only title uses DB-level Realtime.
+  // ── Realtime: title + body-fallback sync via postgres_changes ─────────────
+  // Title is synced here for all users.
+  // Body/Yjs state is synced here as a reliable fallback for shared users who
+  // may have missed incremental Yjs broadcast events (broadcast is at-most-once).
+  // Y.applyUpdate is CRDT-idempotent: it is a no-op when the local doc already
+  // contains all operations in newRow.yjs_state, so calling it on every owner
+  // save is safe.
   useEffect(() => {
     if (!docId) return
 
-    const channel = supabase
-      .channel(`doc-editor-rt-${docId}`)
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'documents', filter: `id=eq.${docId}` },
-        ({ new: newRow }) => {
-          if (isViewOnly) {
-            if (newRow.title != null) { savedTitle.current = newRow.title; titleRef.current = newRow.title; setTitle(newRow.title) }
-            return
-          }
-          const titleDirty = titleRef.current !== savedTitle.current
-          if (!titleDirty && newRow.title != null && newRow.title !== savedTitle.current) {
-            savedTitle.current = newRow.title
-            titleRef.current   = newRow.title
-            setTitle(newRow.title)
-          }
-        }
-      )
-      .subscribe()
+    let destroyed = false
+    let channel = null
+    let retryTimer = null
+    let retryCount = 0
 
-    return () => { supabase.removeChannel(channel) }
-  }, [docId, isViewOnly])
+    const rtChannelName = `doc-editor-rt-${docId}-${Math.random().toString(36).slice(2, 8)}`
+    console.log('[DocEditor] [A] Subscribing postgres_changes channel:', rtChannelName, 'isViewOnly=', isViewOnly, 'sharePermission=', sharePermission)
+
+    function handleUpdate({ new: newRow }) {
+      if (destroyed) return
+      console.log('[DocEditor] [B] postgres_changes UPDATE fired, yjs_state present=', !!newRow.yjs_state, 'title=', newRow.title)
+      // ── Title sync ───────────────────────────────────────────────────
+      if (isViewOnly) {
+        if (newRow.title != null) { savedTitle.current = newRow.title; titleRef.current = newRow.title; setTitle(newRow.title) }
+      } else {
+        const titleDirty = titleRef.current !== savedTitle.current
+        if (!titleDirty && newRow.title != null && newRow.title !== savedTitle.current) {
+          savedTitle.current = newRow.title
+          titleRef.current   = newRow.title
+          setTitle(newRow.title)
+        }
+      }
+
+      // ── Body/Yjs fallback sync (shared users only) ───────────────────
+      if (isViewOnly || (!isViewOnly && sharePermission !== null)) {
+        const ydoc = ydocRef.current
+        console.log('[DocEditor] [C] Applying yjs_state fallback, ydoc present=', !!ydoc, 'yjs_state present=', !!newRow.yjs_state)
+        if (ydoc && newRow.yjs_state) {
+          try {
+            Y.applyUpdate(ydoc, toUint8Array(newRow.yjs_state), 'remote')
+            console.log('[DocEditor] [D] postgres_changes Yjs state applied OK')
+          } catch (err) {
+            console.error('[DocEditor] [D] postgres_changes Yjs applyUpdate FAILED:', err)
+          }
+        } else if (isViewOnly && newRow.body != null && newRow.body !== bodyRef.current) {
+          console.log('[DocEditor] [C] Applying legacy body fallback (no yjs_state)')
+          savedBody.current = newRow.body
+          bodyRef.current   = newRow.body
+          setBody(newRow.body)
+        } else if (!ydoc) {
+          console.warn('[DocEditor] [C] ydoc is null — cannot apply Yjs state from postgres_changes')
+        }
+      }
+    }
+
+    function subscribe() {
+      channel = supabase
+        .channel(rtChannelName)
+        .on(
+          'postgres_changes',
+          { event: 'UPDATE', schema: 'public', table: 'documents', filter: `id=eq.${docId}` },
+          handleUpdate
+        )
+        .subscribe((status) => {
+          console.log('[DocEditor] [A] postgres_changes channel status:', status, '— channel=', rtChannelName)
+          if (destroyed) return
+          if (status === 'SUBSCRIBED') {
+            retryCount = 0
+          } else if (status === 'CHANNEL_ERROR') {
+            retryCount++
+            const delay = Math.min(1000 * retryCount, 5000)
+            console.warn('[DocEditor] postgres_changes CHANNEL_ERROR — will retry in', delay, 'ms (attempt', retryCount, ')')
+            clearTimeout(retryTimer)
+            retryTimer = setTimeout(() => {
+              if (destroyed) return
+              console.log('[DocEditor] Retrying postgres_changes subscription for', rtChannelName)
+              supabase.removeChannel(channel)
+              subscribe()
+            }, delay)
+          }
+        })
+    }
+
+    subscribe()
+
+    return () => {
+      destroyed = true
+      clearTimeout(retryTimer)
+      if (channel) supabase.removeChannel(channel)
+    }
+  }, [docId, isViewOnly, sharePermission]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Yjs CRDT: initialise document and observe changes ───────────────────
   useEffect(() => {
@@ -418,9 +482,13 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
       try {
         Y.applyUpdate(ydoc, toUint8Array(doc.yjs_state))
         ydocReadyRef.current = true
-      } catch {
+        console.log('[DocEditor] [D] Initialized Y.Doc from doc.yjs_state, text length=', ytext.toString().length)
+      } catch (err) {
+        console.error('[DocEditor] [D] Failed to init Y.Doc from doc.yjs_state:', err)
         // Corrupted state — leave empty; will be seeded via provider or no-peers
       }
+    } else {
+      console.log('[DocEditor] doc.yjs_state is null/undefined — will seed via broadcast provider')
     }
 
     // Sync React state with the Yjs content
@@ -437,6 +505,7 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
       // handleBodyChange already called setBody for those.
       if (transaction.origin === 'textarea-input') return
       const text = ytext.toString()
+      console.log('[DocEditor] [D] Yjs observer fired, origin=', transaction.origin, 'new text length=', text.length, 'changed=', text !== bodyRef.current)
       if (text === bodyRef.current) return
 
       // Remote-only update with no pending local body changes: mark as
@@ -478,15 +547,19 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
   // ── Broadcast provider (requires a persisted docId) ─────────────────────
   useEffect(() => {
     if (!docId || !ydocRef.current) return
+
+    console.log('[DocEditor] [A] Creating BroadcastProvider for docId=', docId)
     const provider = new SupabaseBroadcastProvider(supabase, docId, ydocRef.current)
     providerRef.current = provider
 
     provider.on('synced', () => {
       // Peer state received — Y.Doc is now up to date from a remote peer
+      console.log('[DocEditor] Provider emitted synced — applying Yjs text to React state')
       ydocReadyRef.current = true
       const ytext = ytextRef.current
       if (!ytext) return
       const text = ytext.toString()
+      console.log('[DocEditor] [D] After synced, ytext length=', text.length, 'bodyRef=', bodyRef.current.length)
       if (text !== bodyRef.current) {
         savedBody.current = text
         bodyRef.current = text
@@ -497,9 +570,11 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
     provider.on('no-peers', () => {
       // No other clients online — if Y.Doc is still empty (legacy doc with
       // no yjs_state), seed it from the plain-text body now.
+      console.log('[DocEditor] Provider emitted no-peers')
       const ytext = ytextRef.current
       if (!ytext) return
       if (ytext.toString() === '' && doc?.body) {
+        console.log('[DocEditor] Seeding Y.Doc from legacy doc.body')
         ytext.insert(0, doc.body)
         const text = ytext.toString()
         bodyRef.current = text
@@ -511,6 +586,7 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
     provider.on('title-update', (remoteTitle) => {
       // Instant title sync from a peer — skip if the local user is actively
       // editing the title (dirty check).
+      console.log('[DocEditor] Provider emitted title-update, remoteTitle=', remoteTitle)
       const titleDirty = titleRef.current !== savedTitle.current
       if (!titleDirty && remoteTitle != null && remoteTitle !== titleRef.current) {
         savedTitle.current = remoteTitle
