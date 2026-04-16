@@ -19,6 +19,24 @@ import { fromUint8Array, toUint8Array } from 'js-base64'
  */
 
 const SYNC_TIMEOUT_MS = 1500
+const PRESENCE_STALE_MS = 15000
+const PRESENCE_CLEANUP_INTERVAL_MS = 5000
+
+// ── Deterministic color from userId ──────────────────────────────────────
+const PRESENCE_COLORS = [
+  '#e63946', '#2a9d8f', '#e9c46a', '#264653', '#f4a261',
+  '#6a4c93', '#1982c4', '#8ac926', '#ff595e', '#6a0572',
+]
+
+function userColor(userId) {
+  let hash = 0
+  for (let i = 0; i < userId.length; i++) {
+    hash = ((hash << 5) - hash + userId.charCodeAt(i)) | 0
+  }
+  return PRESENCE_COLORS[Math.abs(hash) % PRESENCE_COLORS.length]
+}
+
+export { userColor }
 
 export class SupabaseBroadcastProvider {
   /** @param {import('@supabase/supabase-js').SupabaseClient} supabaseClient */
@@ -34,6 +52,12 @@ export class SupabaseBroadcastProvider {
 
     /** @type {Record<string, Set<Function>>} */
     this._listeners = {}
+
+    // ── Awareness (ephemeral presence state) ──────────────────────────────
+    /** @type {Map<number, { userId: string, name: string, color: string, cursorIndex: number, lastSeen: number }>} */
+    this.awareness = new Map()
+    this._localPresence = null
+    this._clientId = ydoc.clientID
 
     const channelName = `doc-collab-${documentId}`
     console.log('[BroadcastProvider] Creating channel:', channelName)
@@ -72,6 +96,8 @@ export class SupabaseBroadcastProvider {
         event: 'sync-response',
         payload: { state: fromUint8Array(state) },
       })
+      // Re-announce presence so the new peer learns about us
+      this._broadcastPresence()
     })
 
     // ── Sync protocol: receive response when we join ─────────────────────
@@ -102,6 +128,35 @@ export class SupabaseBroadcastProvider {
       this._emit('title-update', payload.title)
     })
 
+    // ── Presence: receive updates from peers ──────────────────────────────
+    this.channel.on('broadcast', { event: 'presence-update' }, ({ payload }) => {
+      if (this.destroyed || !payload) return
+      // Deduplicate: if the same userId appears under a different clientId
+      // (e.g. user reconnected with a new Y.Doc), remove the stale entry.
+      for (const [cid, state] of this.awareness) {
+        if (state.userId === payload.userId && cid !== payload.clientId) {
+          this.awareness.delete(cid)
+        }
+      }
+      this.awareness.set(payload.clientId, {
+        userId: payload.userId,
+        name: payload.name,
+        color: payload.color,
+        avatarUrl: payload.avatarUrl ?? null,
+        cursorIndex: payload.cursorIndex ?? 0,
+        lastSeen: Date.now(),
+      })
+      this._emit('awareness-change')
+    })
+
+    // ── Presence: peer left ───────────────────────────────────────────────
+    this.channel.on('broadcast', { event: 'presence-leave' }, ({ payload }) => {
+      if (this.destroyed || !payload) return
+      if (this.awareness.delete(payload.clientId)) {
+        this._emit('awareness-change')
+      }
+    })
+
     // ── Local → remote: broadcast own updates ────────────────────────────
     // Buffer messages until the channel reaches SUBSCRIBED so they aren't
     // silently dropped by the Supabase client.
@@ -122,6 +177,20 @@ export class SupabaseBroadcastProvider {
       }
     }
     this.ydoc.on('update', this._updateHandler)
+
+    // ── Stale presence cleanup ────────────────────────────────────────────
+    this._cleanupInterval = setInterval(() => {
+      if (this.destroyed) return
+      const now = Date.now()
+      let changed = false
+      for (const [cid, state] of this.awareness) {
+        if (now - state.lastSeen > PRESENCE_STALE_MS) {
+          this.awareness.delete(cid)
+          changed = true
+        }
+      }
+      if (changed) this._emit('awareness-change')
+    }, PRESENCE_CLEANUP_INTERVAL_MS)
 
     // ── Subscribe and request sync ───────────────────────────────────────
     this._subscribe()
@@ -158,6 +227,9 @@ export class SupabaseBroadcastProvider {
           event: 'sync-request',
           payload: {},
         })
+
+        // Announce our presence to existing peers
+        this._broadcastPresence()
 
         // If no peer responds within the timeout, signal the consumer
         this._syncTimeout = setTimeout(() => {
@@ -216,6 +288,7 @@ export class SupabaseBroadcastProvider {
         event: 'sync-response',
         payload: { state: fromUint8Array(state) },
       })
+      this._broadcastPresence()
     })
     this.channel.on('broadcast', { event: 'sync-response' }, ({ payload }) => {
       if (this.destroyed || this.synced) return
@@ -231,6 +304,29 @@ export class SupabaseBroadcastProvider {
     this.channel.on('broadcast', { event: 'title-update' }, ({ payload }) => {
       if (this.destroyed) return
       this._emit('title-update', payload.title)
+    })
+    this.channel.on('broadcast', { event: 'presence-update' }, ({ payload }) => {
+      if (this.destroyed || !payload) return
+      for (const [cid, state] of this.awareness) {
+        if (state.userId === payload.userId && cid !== payload.clientId) {
+          this.awareness.delete(cid)
+        }
+      }
+      this.awareness.set(payload.clientId, {
+        userId: payload.userId,
+        name: payload.name,
+        color: payload.color,
+        avatarUrl: payload.avatarUrl ?? null,
+        cursorIndex: payload.cursorIndex ?? 0,
+        lastSeen: Date.now(),
+      })
+      this._emit('awareness-change')
+    })
+    this.channel.on('broadcast', { event: 'presence-leave' }, ({ payload }) => {
+      if (this.destroyed || !payload) return
+      if (this.awareness.delete(payload.clientId)) {
+        this._emit('awareness-change')
+      }
     })
   }
 
@@ -261,16 +357,48 @@ export class SupabaseBroadcastProvider {
     })
   }
 
+  // ── Awareness: presence management ─────────────────────────────────────
+
+  /** Set the local user's presence state and broadcast it to peers. */
+  setLocalPresence({ userId, name, cursorIndex, avatarUrl }) {
+    const color = userColor(userId)
+    this._localPresence = { clientId: this._clientId, userId, name, color, avatarUrl: avatarUrl ?? null, cursorIndex }
+    this._broadcastPresence()
+  }
+
+  /** Broadcast a leave event so peers remove this client immediately. */
+  sendLeave() {
+    if (this.destroyed || !this._subscribed) return
+    this.channel.send({
+      type: 'broadcast',
+      event: 'presence-leave',
+      payload: { clientId: this._clientId },
+    })
+  }
+
+  /** @private */
+  _broadcastPresence() {
+    if (this.destroyed || !this._subscribed || !this._localPresence) return
+    this.channel.send({
+      type: 'broadcast',
+      event: 'presence-update',
+      payload: this._localPresence,
+    })
+  }
+
   // ── Teardown ───────────────────────────────────────────────────────────
 
   destroy() {
     if (this.destroyed) return
     console.log('[BroadcastProvider] Destroying channel doc-collab-', this._documentId)
+    this.sendLeave()
     this.destroyed = true
     this._subscribed = false
     this._pendingUpdates = []
     clearTimeout(this._syncTimeout)
     clearTimeout(this._retryTimer)
+    clearInterval(this._cleanupInterval)
+    this.awareness.clear()
     this.ydoc.off('update', this._updateHandler)
     this.supabase.removeChannel(this.channel)
     this._listeners = {}

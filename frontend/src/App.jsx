@@ -318,6 +318,9 @@ export default function App() {
           <Route path="/documents/:id" element={
             <DocumentEditorRoute
               userId={userId}
+              userEmail={user?.email}
+              displayName={displayName}
+              avatarUrl={avatarSignedUrl}
               onOpenShare={doc => setSharingDocument(doc)}
             />
           } />

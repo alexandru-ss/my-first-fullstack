@@ -5,7 +5,7 @@ import remarkGfm from 'remark-gfm'
 import * as Y from 'yjs'
 import { fromUint8Array, toUint8Array } from 'js-base64'
 import { supabase } from '../lib/supabase'
-import { SupabaseBroadcastProvider } from '../lib/SupabaseBroadcastProvider'
+import { SupabaseBroadcastProvider, userColor } from '../lib/SupabaseBroadcastProvider'
 
 // ── Memoized preview ────────────────────────────────────────────────────────
 // rerender-no-inline-components + rerender-memo: module-scope memoized component
@@ -19,6 +19,136 @@ const Preview = memo(function Preview({ markdown }) {
     </div>
   )
 })
+
+// ── Presence bar: colored avatar circles for connected peers ────────────────
+const PresenceBar = memo(function PresenceBar({ users }) {
+  if (!users || users.length === 0) return null
+  return (
+    <div className="presence-bar">
+      {users.map(u => (
+        <span
+          key={u.clientId}
+          className="presence-avatar"
+          style={{ background: u.color }}
+          title={u.name}
+        >
+          {u.avatarUrl
+            ? <img src={u.avatarUrl} alt={u.name} className="presence-avatar-img" />
+            : (u.name || '?')[0].toUpperCase()}
+        </span>
+      ))}
+    </div>
+  )
+})
+
+// ── Remote cursor overlay: colored line highlights with name labels ──────────
+// Uses a hidden mirror <div> to account for word-wrap when calculating the
+// vertical offset of each remote cursor.
+const CursorOverlay = memo(function CursorOverlay({ users, body, scrollTop, textareaEl }) {
+  if (!users || users.length === 0 || !textareaEl) return null
+
+  // Build a mirror div that replicates the textarea's layout exactly
+  const cs = getComputedStyle(textareaEl)
+  const mirrorStyle = {
+    position: 'absolute',
+    visibility: 'hidden',
+    top: 0,
+    left: 0,
+    width: cs.width,
+    padding: cs.padding,
+    fontFamily: cs.fontFamily,
+    fontSize: cs.fontSize,
+    fontWeight: cs.fontWeight,
+    lineHeight: cs.lineHeight,
+    letterSpacing: cs.letterSpacing,
+    wordSpacing: cs.wordSpacing,
+    whiteSpace: 'pre-wrap',
+    wordWrap: 'break-word',
+    overflowWrap: 'break-word',
+    boxSizing: cs.boxSizing,
+    border: cs.border,
+    overflow: 'hidden',
+    height: 'auto',
+    pointerEvents: 'none',
+  }
+
+  // Measure each user's cursor position using the mirror
+  const lineHeight = parseFloat(cs.lineHeight)
+  // If lineHeight is unitless (e.g. 1.65 not 23px), compute from fontSize
+  const computedLineHeight = lineHeight > 10 ? lineHeight : parseFloat(cs.fontSize) * lineHeight
+
+  const positions = users.map(u => {
+    const idx = Math.min(u.cursorIndex ?? 0, body.length)
+    return { ...u, idx }
+  })
+
+  return (
+    <div className="cursor-overlay">
+      {/* Hidden mirror to measure real line offsets with word-wrap */}
+      <CursorMirror
+        mirrorStyle={mirrorStyle}
+        body={body}
+        positions={positions}
+        scrollTop={scrollTop}
+        lineHeight={computedLineHeight}
+      />
+    </div>
+  )
+})
+
+// Separate component so the mirror div exists in the DOM for measurement
+function CursorMirror({ mirrorStyle, body, positions, scrollTop, lineHeight }) {
+  const mirrorRef = useRef(null)
+  const [offsets, setOffsets] = useState([])
+
+  useEffect(() => {
+    const mirror = mirrorRef.current
+    if (!mirror) return
+
+    const results = positions.map(pos => {
+      // Clear and rebuild mirror content: text up to cursor + probe span
+      mirror.textContent = ''
+      const before = document.createTextNode(body.slice(0, pos.idx))
+      const probe = document.createElement('span')
+      probe.textContent = body[pos.idx] || '\u200b' // zero-width space if at end
+      const after = document.createTextNode(body.slice(pos.idx + 1))
+      mirror.appendChild(before)
+      mirror.appendChild(probe)
+      mirror.appendChild(after)
+
+      return {
+        top: probe.offsetTop,
+        clientId: pos.clientId,
+        name: pos.name,
+        color: pos.color,
+      }
+    })
+
+    setOffsets(results)
+  }, [body, positions, mirrorRef]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <>
+      <div ref={mirrorRef} style={mirrorStyle} aria-hidden="true" />
+      {offsets.map(o => (
+        <div
+          key={o.clientId}
+          className="cursor-highlight"
+          style={{
+            top: o.top - scrollTop,
+            height: lineHeight,
+            borderLeftColor: o.color,
+            backgroundColor: o.color + '18',
+          }}
+        >
+          <span className="cursor-label" style={{ background: o.color }}>
+            {o.name}
+          </span>
+        </div>
+      ))}
+    </>
+  )
+}
 
 // ── Resizable split-pane hook ───────────────────────────────────────────────
 // rerender-use-ref-transient-values: fraction is a high-frequency transient
@@ -151,9 +281,9 @@ function mapCursorPosition(delta, pos) {
  * (or renders a blank editor for /documents/new), and passes it to DocumentEditor.
  * Also checks document_shares to determine the calling user's permission level.
  *
- * @param {{ userId: string, onOpenShare: (doc: object) => void }} props
+ * @param {{ userId: string, userEmail: string, displayName: string, avatarUrl: string | null, onOpenShare: (doc: object) => void }} props
  */
-export function DocumentEditorRoute({ userId, onOpenShare }) {
+export function DocumentEditorRoute({ userId, userEmail, displayName, avatarUrl, onOpenShare }) {
   const { id } = useParams()
   const navigate = useNavigate()
   const isNew = id === 'new'
@@ -219,6 +349,9 @@ export function DocumentEditorRoute({ userId, onOpenShare }) {
     <DocumentEditor
       key={id}
       userId={userId}
+      userEmail={userEmail}
+      displayName={displayName}
+      avatarUrl={avatarUrl}
       document={doc}
       navigate={navigate}
       sharePermission={isOwner ? null : sharePermission}
@@ -236,13 +369,16 @@ export function DocumentEditorRoute({ userId, onOpenShare }) {
  *
  * @param {{
  *   userId: string,
+ *   userEmail: string,
+ *   displayName: string,
+ *   avatarUrl: string | null,
  *   document: object | null,
  *   navigate: (path: string, opts?: object) => void,
  *   sharePermission: string | null,
  *   onOpenShare: ((doc: object) => void) | null,
  * }} props
  */
-export function DocumentEditor({ userId, document: doc, navigate, sharePermission, onOpenShare }) {
+export function DocumentEditor({ userId, userEmail, displayName, avatarUrl, document: doc, navigate, sharePermission, onOpenShare }) {
   const isViewOnly = sharePermission === 'view'
   const canEdit = sharePermission === null || sharePermission === 'edit'
 
@@ -269,6 +405,10 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
   const providerRef = useRef(null)
   const ydocReadyRef = useRef(false)
 
+  // ── Awareness (presence + remote cursors) ───────────────────────────────
+  const [remoteUsers, setRemoteUsers] = useState([])
+  const [textareaScrollTop, setTextareaScrollTop] = useState(0)
+  const presenceThrottleRef = useRef(0)
   // ── Auto-save (debounced 1.5 s after typing stops) ──────────────────────
   // Track what's already persisted so we can skip no-op saves.
   // StrictMode-safe: on mount the values equal the DB values → skip.
@@ -595,11 +735,39 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
       }
     })
 
+    // ── Awareness: announce presence and listen for peers ──────────────
+    const presenceName = displayName || userEmail || 'Anonymous'
+    provider.setLocalPresence({ userId, name: presenceName, cursorIndex: 0, avatarUrl })
+
+    const handleAwareness = () => {
+      const clientId = ydocRef.current?.clientID
+      const users = []
+      for (const [cid, state] of provider.awareness) {
+        if (cid !== clientId) users.push({ clientId: cid, ...state })
+      }
+      setRemoteUsers(users)
+    }
+    provider.on('awareness-change', handleAwareness)
+
     return () => {
+      provider.off('awareness-change', handleAwareness)
       provider.destroy()
       providerRef.current = null
+      setRemoteUsers([])
     }
   }, [docId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Re-broadcast presence when avatarUrl or displayName changes ────────
+  useEffect(() => {
+    const provider = providerRef.current
+    if (!provider || !userId) return
+    provider.setLocalPresence({
+      userId,
+      name: displayName || userEmail || 'Anonymous',
+      cursorIndex: textareaRef.current?.selectionStart ?? 0,
+      avatarUrl,
+    })
+  }, [avatarUrl, displayName]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Page unload safety net ──────────────────────────────────────────────
   useEffect(() => {
@@ -630,6 +798,7 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
       if (document.visibilityState === 'hidden') flushSave()
     }
     const handleBeforeUnload = (e) => {
+      providerRef.current?.sendLeave()
       const dirty =
         titleRef.current !== savedTitle.current ||
         bodyRef.current !== savedBody.current
@@ -688,6 +857,26 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
     }
   }
 
+  // ── Broadcast cursor position (throttled) ─────────────────────────────
+  function broadcastCursor() {
+    const now = Date.now()
+    if (now - presenceThrottleRef.current < 200) return
+    presenceThrottleRef.current = now
+    const provider = providerRef.current
+    if (!provider || !userId) return
+    const cursorIndex = textareaRef.current?.selectionStart ?? 0
+    provider.setLocalPresence({
+      userId,
+      name: displayName || userEmail || 'Anonymous',
+      cursorIndex,
+      avatarUrl,
+    })
+  }
+
+  function handleTextareaScroll(e) {
+    setTextareaScrollTop(e.target.scrollTop)
+  }
+
   return (
     <div className="doc-editor-shell">
       {/* ── Header row ──────────────────────────────────────────────────── */}
@@ -716,6 +905,7 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
             Share
           </button>
         )}
+        <PresenceBar users={remoteUsers} />
         {canEdit && (
           <span className={`doc-save-status doc-save-status--${saveStatus}`}>
             {saveStatus === 'saving' && 'Saving…'}
@@ -738,15 +928,22 @@ export function DocumentEditor({ userId, document: doc, navigate, sharePermissio
         /* ── Split pane (owner or edit permission) ─────────────────── */
         <div className="doc-editor-split" ref={containerRef}>
           <div className="doc-editor-pane">
-            <textarea
-              ref={textareaRef}
-              className="doc-editor-textarea"
-              placeholder="Write Markdown here…"
-              value={body}
-              onChange={handleBodyChange}
-              onKeyDown={handleKeyDown}
-              spellCheck={false}
-            />
+            <div className="doc-editor-textarea-wrapper">
+              <textarea
+                ref={textareaRef}
+                className="doc-editor-textarea"
+                placeholder="Write Markdown here…"
+                value={body}
+                onChange={handleBodyChange}
+                onKeyDown={handleKeyDown}
+                onSelect={broadcastCursor}
+                onClick={broadcastCursor}
+                onKeyUp={broadcastCursor}
+                onScroll={handleTextareaScroll}
+                spellCheck={false}
+              />
+              <CursorOverlay users={remoteUsers} body={body} scrollTop={textareaScrollTop} textareaEl={textareaRef.current} />
+            </div>
           </div>
 
           <div

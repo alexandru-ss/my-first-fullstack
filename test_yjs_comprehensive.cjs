@@ -11,6 +11,11 @@
  *   7. Legacy doc (no yjs_state): seeds from plain-text body
  *   8. DB verification: yjs_state column populated, body matches
  *   9. Title change does NOT delete content (ydocReady guard)
+ *  10. Title sync via Broadcast
+ *  11. Presence broadcast: A sets presence → B receives it
+ *  12. Presence leave: A sends leave → B removes A
+ *  13. Stale presence timeout: A goes silent → removed after 15s
+ *  14. Deterministic colors: same userId → same color always
  *
  * Usage: node test_yjs_comprehensive.cjs
  */
@@ -27,7 +32,7 @@ const PASSWORD = 'password123'
 function wait(ms) { return new Promise(r => setTimeout(r, ms)) }
 function pad(label) { return label.padEnd(48, ' ') }
 
-let Y, fromUint8Array, toUint8Array, SupabaseBroadcastProvider
+let Y, fromUint8Array, toUint8Array, SupabaseBroadcastProvider, userColor
 let clientA, clientB, userAId, userBId
 let passed = 0, failed = 0
 
@@ -38,6 +43,7 @@ async function setup() {
   toUint8Array = base64.toUint8Array
   const provider = await import('./frontend/src/lib/SupabaseBroadcastProvider.js')
   SupabaseBroadcastProvider = provider.SupabaseBroadcastProvider
+  userColor = provider.userColor
 
   clientA = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
   clientB = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
@@ -525,6 +531,162 @@ async function testTitleBroadcastSync() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Test 11: Presence broadcast — A sets presence → B receives it
+// ═══════════════════════════════════════════════════════════════════════════
+async function testPresenceBroadcast() {
+  console.log('═══ Test 11: Presence broadcast ═══')
+
+  const seedDoc = new Y.Doc()
+  seedDoc.getText('content').insert(0, 'presence test')
+  const seedState = Y.encodeStateAsUpdate(seedDoc)
+  seedDoc.destroy()
+
+  const doc = await createTestDoc('Test-Presence-' + Date.now(), 'presence test')
+
+  const ydocA = new Y.Doc(), ydocB = new Y.Doc()
+  Y.applyUpdate(ydocA, seedState)
+  Y.applyUpdate(ydocB, seedState)
+
+  const provA = new SupabaseBroadcastProvider(clientA, doc.id, ydocA)
+  await wait(1500)
+  const provB = new SupabaseBroadcastProvider(clientB, doc.id, ydocB)
+  await wait(2000)
+
+  // Track awareness changes at B
+  let bAwarenessChanged = false
+  provB.on('awareness-change', () => { bAwarenessChanged = true })
+
+  // Alice announces presence
+  provA.setLocalPresence({ userId: userAId, name: 'Alice', cursorIndex: 5 })
+  await wait(1500)
+
+  assert('Bob received awareness change', bAwarenessChanged)
+  assert('Bob\'s awareness has 1 entry', provB.awareness.size === 1)
+
+  // Find Alice's entry
+  const aliceEntry = [...provB.awareness.values()].find(s => s.userId === userAId)
+  assert('Alice\'s userId matches', aliceEntry?.userId === userAId)
+  assert('Alice\'s name is correct', aliceEntry?.name === 'Alice')
+  assert('Alice\'s color is set', aliceEntry?.color != null && aliceEntry.color.length > 0)
+  assert('Alice\'s cursorIndex is 5', aliceEntry?.cursorIndex === 5)
+  assert('Alice\'s color is deterministic', aliceEntry?.color === userColor(userAId))
+
+  provA.destroy(); provB.destroy()
+  ydocA.destroy(); ydocB.destroy()
+  console.log()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Test 12: Presence leave — A sends leave → B removes A
+// ═══════════════════════════════════════════════════════════════════════════
+async function testPresenceLeave() {
+  console.log('═══ Test 12: Presence leave ═══')
+
+  const seedDoc = new Y.Doc()
+  seedDoc.getText('content').insert(0, 'leave test')
+  const seedState = Y.encodeStateAsUpdate(seedDoc)
+  seedDoc.destroy()
+
+  const doc = await createTestDoc('Test-Leave-' + Date.now(), 'leave test')
+
+  const ydocA = new Y.Doc(), ydocB = new Y.Doc()
+  Y.applyUpdate(ydocA, seedState)
+  Y.applyUpdate(ydocB, seedState)
+
+  const provA = new SupabaseBroadcastProvider(clientA, doc.id, ydocA)
+  await wait(1500)
+  const provB = new SupabaseBroadcastProvider(clientB, doc.id, ydocB)
+  await wait(2000)
+
+  // Alice announces presence
+  provA.setLocalPresence({ userId: userAId, name: 'Alice', cursorIndex: 0 })
+  await wait(1500)
+  assert('Bob sees Alice before leave', provB.awareness.size === 1)
+
+  // Alice sends leave
+  provA.sendLeave()
+  await wait(1500)
+  assert('Bob\'s awareness empty after leave', provB.awareness.size === 0)
+
+  provA.destroy(); provB.destroy()
+  ydocA.destroy(); ydocB.destroy()
+  console.log()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Test 13: Stale presence timeout — A goes silent → B removes after timeout
+// ═══════════════════════════════════════════════════════════════════════════
+async function testStalePresenceTimeout() {
+  console.log('═══ Test 13: Stale presence timeout ═══')
+
+  const seedDoc = new Y.Doc()
+  seedDoc.getText('content').insert(0, 'stale test')
+  const seedState = Y.encodeStateAsUpdate(seedDoc)
+  seedDoc.destroy()
+
+  const doc = await createTestDoc('Test-Stale-' + Date.now(), 'stale test')
+
+  const ydocA = new Y.Doc(), ydocB = new Y.Doc()
+  Y.applyUpdate(ydocA, seedState)
+  Y.applyUpdate(ydocB, seedState)
+
+  const provA = new SupabaseBroadcastProvider(clientA, doc.id, ydocA)
+  await wait(1500)
+  const provB = new SupabaseBroadcastProvider(clientB, doc.id, ydocB)
+  await wait(2000)
+
+  // Alice announces presence
+  provA.setLocalPresence({ userId: userAId, name: 'Alice', cursorIndex: 0 })
+  await wait(1500)
+  assert('Bob sees Alice initially', provB.awareness.size === 1)
+
+  // Manually backdate Alice's lastSeen to simulate staleness
+  for (const [cid, state] of provB.awareness) {
+    state.lastSeen = Date.now() - 20000 // 20s ago — beyond 15s threshold
+  }
+
+  // Wait for the cleanup interval (runs every 5s)
+  await wait(6000)
+  assert('Stale entry removed after timeout', provB.awareness.size === 0)
+
+  provA.destroy(); provB.destroy()
+  ydocA.destroy(); ydocB.destroy()
+  console.log()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Test 14: Deterministic colors — same userId always produces same color
+// ═══════════════════════════════════════════════════════════════════════════
+async function testDeterministicColors() {
+  console.log('═══ Test 14: Deterministic colors ═══')
+
+  const color1 = userColor(userAId)
+  const color2 = userColor(userAId)
+  const color3 = userColor(userAId)
+  assert('Same userId → same color (call 1 vs 2)', color1 === color2)
+  assert('Same userId → same color (call 2 vs 3)', color2 === color3)
+  assert('Color is a valid hex string', /^#[0-9a-f]{6}$/i.test(color1))
+
+  const colorB = userColor(userBId)
+  assert('Different userId → different color', color1 !== colorB)
+  assert('Bob\'s color is also valid hex', /^#[0-9a-f]{6}$/i.test(colorB))
+
+  // Verify consistency across different Y.Doc instances
+  const ydoc1 = new Y.Doc(), ydoc2 = new Y.Doc()
+  const prov1 = new SupabaseBroadcastProvider(clientA, 'dummy-1', ydoc1)
+  const prov2 = new SupabaseBroadcastProvider(clientA, 'dummy-2', ydoc2)
+  // Both use same userId → same color
+  prov1.setLocalPresence({ userId: userAId, name: 'Alice', cursorIndex: 0 })
+  prov2.setLocalPresence({ userId: userAId, name: 'Alice', cursorIndex: 0 })
+  assert('Color consistent across providers', prov1._localPresence.color === prov2._localPresence.color)
+  assert('Color matches userColor()', prov1._localPresence.color === color1)
+
+  prov1.destroy(); prov2.destroy()
+  ydoc1.destroy(); ydoc2.destroy()
+  console.log()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Run all tests
 // ═══════════════════════════════════════════════════════════════════════════
 async function main() {
@@ -551,6 +713,14 @@ async function main() {
   await testTitleChangePreservesContent()
   await wait(500)
   await testTitleBroadcastSync()
+  await wait(500)
+  await testPresenceBroadcast()
+  await wait(500)
+  await testPresenceLeave()
+  await wait(500)
+  await testStalePresenceTimeout()
+  await wait(500)
+  await testDeterministicColors()
 
   console.log('═══════════════════════════════════════════════════════════')
   console.log(`  Results: ${passed} passed, ${failed} failed, ${passed + failed} total`)
